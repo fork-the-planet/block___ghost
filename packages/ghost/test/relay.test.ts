@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { gatherRelayContext } from "../src/relay.js";
+import {
+  GHOST_RELAY_REQUEST_SCHEMA,
+  gatherRelayContext,
+  parseGhostRelayRequest,
+} from "../src/relay.js";
 import {
   createSingleSurfaceSandbox,
   removeSandbox,
@@ -25,6 +29,49 @@ describe("relay", () => {
     });
 
     expect(result.schema).toBe("ghost.relay.gather/v2");
+    expect(result.context.schema).toBe("ghost.relay-context/v1");
+    expect(result).not.toHaveProperty("context_packet");
+    expect(result.context.target).toMatchObject({
+      mode: "generation",
+      paths: ["apps/refunds/settings/page.tsx"],
+    });
+    expect(result.context.config).toMatchObject({
+      id: "ghost.default/v1",
+      source: "default",
+    });
+    expect(result.context.sections.intent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ref: "intent.principle:refund-trust",
+          source: "intent.yml",
+        }),
+      ]),
+    );
+    expect(result.context.sections.composition).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ref: "composition.pattern:refund-disclosure",
+          source: "composition.yml",
+        }),
+      ]),
+    );
+    expect(result.context.sections.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ref: "validate.check:no-hardcoded-ui-color",
+          source: "validate.yml",
+        }),
+      ]),
+    );
+    expect(result.context.trace.selected).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "composition.yml",
+          section: "composition",
+          ref: "composition.pattern:refund-disclosure",
+        }),
+      ]),
+    );
     expect(result.source.kind).toBe("stack");
     expect(result.targetPaths).toEqual(["apps/refunds/settings/page.tsx"]);
     expect(result.selected_context.match.status).toBe("path-match");
@@ -204,6 +251,386 @@ describe("relay", () => {
     ]);
   });
 
+  it("projects declared custom questions, sources, and extras", async () => {
+    const root = await track(createSingleSurfaceSandbox());
+    await mkdir(join(root, "product"), { recursive: true });
+    await writeFile(
+      join(root, ".ghost", "relay.yml"),
+      `schema: ghost.relay-config/v1
+id: acme.product-surface/v1
+profile: ghost.product-surface/v1
+sources:
+  - id: product-questions
+    path: product/questions.yml
+    section: questions
+    items: questions
+    summary: question
+    include:
+      - blocks
+    max_chars: 4000
+  - id: product-sources
+    path: product/sources.yml
+    section: sources
+    items: sources
+    summary: summary
+  - id: brand-voice
+    path: product/brand.yml
+    section: extra:brand_voice
+    items: guidance
+    summary: summary
+  - id: internal-questions
+    path: product/internal.yml
+    section: questions
+    visibility: internal
+    items: questions
+    summary: question
+  - id: schema-only
+    path: product/schema-only.yml
+    section: questions
+    items: questions
+`,
+    );
+    await writeFile(
+      join(root, "product", "questions.yml"),
+      `questions:
+  - id: refund-policy
+    question: Should refunds require manager approval?
+    blocks:
+      - final copy
+`,
+    );
+    await writeFile(
+      join(root, "product", "sources.yml"),
+      `sources:
+  - id: design-registry
+    summary: Registry source for refund settings.
+`,
+    );
+    await writeFile(
+      join(root, "product", "brand.yml"),
+      `guidance:
+  - id: plain-language
+    summary: Use plain operational language.
+`,
+    );
+    await writeFile(
+      join(root, "product", "internal.yml"),
+      `questions:
+  - id: internal-policy
+    question: Hidden internal question.
+`,
+    );
+    await writeFile(
+      join(root, "product", "schema-only.yml"),
+      "schema: acme/v1\n",
+    );
+
+    const result = await gatherRelayContext({
+      cwd: root,
+      target: "apps/refunds/settings/page.tsx",
+    });
+
+    expect(result.context.config).toMatchObject({
+      id: "acme.product-surface/v1",
+      source: "file",
+    });
+    expect(result.context.target).toMatchObject({
+      mode: "generation",
+    });
+    expect(result.context.sections.questions).toEqual([
+      expect.objectContaining({
+        id: "refund-policy",
+        source: "product/questions.yml",
+        summary: "Should refunds require manager approval?",
+        content: { blocks: ["final copy"] },
+      }),
+    ]);
+    expect(result.context.sections.sources).toEqual([
+      expect.objectContaining({
+        id: "design-registry",
+        source: "product/sources.yml",
+        summary: "Registry source for refund settings.",
+      }),
+    ]);
+    expect(result.context.extras.brand_voice).toEqual([
+      expect.objectContaining({
+        id: "plain-language",
+        source: "product/brand.yml",
+        summary: "Use plain operational language.",
+      }),
+    ]);
+    expect(result.context.trace.selected).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "product/questions.yml",
+          section: "questions",
+          source_id: "product-questions",
+        }),
+        expect.objectContaining({
+          source: "product/sources.yml",
+          section: "sources",
+          source_id: "product-sources",
+        }),
+        expect.objectContaining({
+          source: "product/brand.yml",
+          section: "extra:brand_voice",
+          source_id: "brand-voice",
+        }),
+      ]),
+    );
+    expect(result.context.trace.skipped).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source_id: "internal-questions",
+          reason: ["visibility is internal"],
+        }),
+        expect.objectContaining({
+          source_id: "schema-only",
+          reason: ["items 'questions' was not found"],
+        }),
+      ]),
+    );
+  });
+
+  it("accepts structured Relay requests", () => {
+    const request = parseGhostRelayRequest({
+      schema: GHOST_RELAY_REQUEST_SCHEMA,
+      task: "generate-interface",
+      prompt: "Generate a subscriber email interface.",
+      target_paths: ["apps/portal/page.tsx"],
+      selectors: {
+        customer: "subscriber",
+        system: "portal",
+        medium: "email",
+      },
+      constraints: {
+        output: "interface",
+      },
+    });
+
+    expect(request).toMatchObject({
+      schema: "ghost.relay-request/v1",
+      task: "generate-interface",
+      selectors: {
+        customer: "subscriber",
+        system: "portal",
+        medium: "email",
+      },
+    });
+  });
+
+  it("resolves a Relay request to a declared stack and projects ordered unit sources", async () => {
+    const root = await track(createRelayRequestStackSandbox());
+
+    const result = await gatherRelayContext({
+      cwd: root,
+      request: {
+        schema: GHOST_RELAY_REQUEST_SCHEMA,
+        task: "generate-interface",
+        prompt:
+          "Generate the right interface for a subscriber renewal reminder in portal email.",
+        selectors: {
+          customer: "subscriber",
+          system: "portal",
+          moment: "renewal-reminder",
+          medium: "email",
+          capability: "billing",
+        },
+      },
+    });
+
+    expect(result.schema).toBe("ghost.relay.gather/v2");
+    expect(result.source.kind).toBe("request-stack");
+    expect(result.source).toMatchObject({
+      stack: {
+        id: "portal.renewal-reminder.email",
+        path: "stacks/portal.renewal-reminder.email.yml",
+        units: ["systems/portal", "media/email", "capabilities/billing"],
+        matched_selectors: [
+          "customer",
+          "system",
+          "moment",
+          "medium",
+          "capability",
+        ],
+      },
+    });
+    expect(result.context.target.request).toMatchObject({
+      schema: "ghost.relay-request/v1",
+      task: "generate-interface",
+      selectors: {
+        customer: "subscriber",
+        system: "portal",
+        moment: "renewal-reminder",
+        medium: "email",
+        capability: "billing",
+      },
+    });
+    expect(result.context.extras.resolved_stack).toEqual([
+      expect.objectContaining({
+        id: "portal.renewal-reminder.email",
+        source: "stacks/portal.renewal-reminder.email.yml",
+      }),
+    ]);
+    expect(result.context.sections.questions).toEqual([
+      expect.objectContaining({
+        id: "email-sensitive-detail",
+        source: "media/email/questions.yml",
+        source_id: "demo-stacks:media.email:unit-questions",
+        summary: "What sensitive detail is safe in email?",
+      }),
+    ]);
+    expect(result.context.sections.sources).toEqual([
+      expect.objectContaining({
+        id: "portal-principles",
+        source: "systems/portal/sources.yml",
+        summary: "Portal research principles.",
+      }),
+    ]);
+    expect(result.context.extras.composition).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "email-route-to-detail",
+          source: "media/email/composition.yml",
+          summary: "Email previews route to authenticated detail.",
+        }),
+      ]),
+    );
+    expect(result.context.trace.selected).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "relay-request",
+          section: "extra:relay_request",
+          source_id: "relay-request",
+        }),
+        expect.objectContaining({
+          source: "stacks/portal.renewal-reminder.email.yml",
+          section: "extra:resolved_stack",
+          source_id: "demo-stacks",
+        }),
+        expect.objectContaining({
+          source: "media/email/questions.yml",
+          section: "questions",
+        }),
+      ]),
+    );
+    expect(result.context.trace.skipped).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "capabilities/billing/questions.yml",
+          reason: ["source file not found"],
+        }),
+      ]),
+    );
+    expect(result).not.toHaveProperty("context_packet");
+  });
+
+  it("does not silently guess when Relay request selectors are ambiguous", async () => {
+    const root = await track(createRelayRequestStackSandbox());
+
+    const result = await gatherRelayContext({
+      cwd: root,
+      request: {
+        schema: GHOST_RELAY_REQUEST_SCHEMA,
+        task: "answer",
+        selectors: {
+          system: "portal",
+        },
+      },
+    });
+
+    expect(result.source.kind).toBe("request");
+    expect(result.source).toMatchObject({
+      reason: "ambiguous",
+    });
+    expect(result.context.gaps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "request-ambiguous",
+        }),
+      ]),
+    );
+    expect(result.context.sections.questions).toEqual([]);
+    expect(result.context.trace.skipped).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          section: "extra:resolved_stack",
+          reason: ["ambiguous Relay request match"],
+        }),
+      ]),
+    );
+  });
+
+  it("uses an explicit Relay config over the discovered config", async () => {
+    const root = await track(createSingleSurfaceSandbox());
+    await mkdir(join(root, "product"), { recursive: true });
+    await writeFile(
+      join(root, ".ghost", "relay.yml"),
+      `schema: ghost.relay-config/v1
+id: discovered/v1
+sources: []
+`,
+    );
+    await writeFile(
+      join(root, "product", "relay.yml"),
+      `schema: ghost.relay-config/v1
+id: explicit/v1
+sources:
+  - id: product-questions
+    path: product/questions.yml
+    section: questions
+    items: questions
+    summary: question
+`,
+    );
+    await writeFile(
+      join(root, "product", "questions.yml"),
+      `questions:
+  - id: refund-policy
+    question: Should refunds require manager approval?
+`,
+    );
+
+    const result = await gatherRelayContext({
+      cwd: root,
+      target: "apps/refunds/settings/page.tsx",
+      config: "product/relay.yml",
+    });
+
+    expect(result.context.config).toMatchObject({
+      id: "explicit/v1",
+      source: "file",
+    });
+    expect(result.context.sections.questions).toEqual([
+      expect.objectContaining({
+        id: "refund-policy",
+        summary: "Should refunds require manager approval?",
+      }),
+    ]);
+  });
+
+  it("rejects unnamespaced extra sections", async () => {
+    const root = await track(createSingleSurfaceSandbox());
+    await writeFile(
+      join(root, ".ghost", "relay.yml"),
+      `schema: ghost.relay-config/v1
+id: acme.invalid/v1
+sources:
+  - id: invalid-extra
+    path: product/brand.yml
+    section: brand_voice
+    summary: summary
+`,
+    );
+
+    await expect(
+      gatherRelayContext({
+        cwd: root,
+        target: "apps/refunds/settings/page.tsx",
+      }),
+    ).rejects.toThrow(/Invalid Ghost Relay config/);
+  });
+
   async function track(rootPromise: Promise<string>): Promise<string> {
     const root = await rootPromise;
     roots.push(root);
@@ -335,6 +762,115 @@ checks:
 `,
   );
 
+  return root;
+}
+
+async function createRelayRequestStackSandbox(): Promise<string> {
+  const root = await createSingleSurfaceSandbox();
+  await mkdir(join(root, "stacks"), { recursive: true });
+  await mkdir(join(root, "systems", "portal"), { recursive: true });
+  await mkdir(join(root, "media", "push"), { recursive: true });
+  await mkdir(join(root, "media", "chat"), { recursive: true });
+  await mkdir(join(root, "capabilities", "lending"), { recursive: true });
+  await writeFile(
+    join(root, ".ghost", "relay.yml"),
+    `schema: ghost.relay-config/v1
+id: demo.product-surface/v1
+profile: ghost.product-surface/v1
+sources: []
+request_resolvers:
+  - id: demo-stacks
+    kind: stack
+    files:
+      - stacks/*.yml
+    schema: demo.stack/v1
+    unit_sources:
+      - id: unit-questions
+        path: "{unit}/questions.yml"
+        section: questions
+        items: questions
+        summary: question
+        include:
+          - risk
+      - id: unit-sources
+        path: "{unit}/sources.yml"
+        section: sources
+        items: sources
+        summary: summary
+      - id: unit-composition
+        path: "{unit}/composition.yml"
+        section: extra:composition
+        items: patterns
+        summary: pattern
+`,
+  );
+  await writeFile(
+    join(root, "stacks", "portal.renewal-reminder.email.yml"),
+    `schema: demo.stack/v1
+id: portal.renewal-reminder.email
+title: Portal renewal reminder via email
+status: draft
+purpose: Resolve context for portal email.
+task_context:
+  customer: subscriber
+  system: systems.portal
+  moment: moments.subscription-renewal-reminder
+  medium: media.email
+  capability: capabilities.billing
+units:
+  - systems/portal
+  - media/email
+  - capabilities/billing
+`,
+  );
+  await writeFile(
+    join(root, "stacks", "portal.renewal-reminder.sms.yml"),
+    `schema: demo.stack/v1
+id: portal.renewal-reminder.sms
+title: Portal renewal reminder via SMS
+status: draft
+purpose: Resolve context for portal SMS.
+task_context:
+  customer: subscriber
+  system: systems.portal
+  moment: moments.subscription-renewal-reminder
+  medium: media.sms
+  capability: capabilities.billing
+units:
+  - systems/portal
+  - media/sms
+  - capabilities/billing
+`,
+  );
+  await writeFile(
+    join(root, "systems", "portal", "sources.yml"),
+    `sources:
+  - id: portal-principles
+    summary: Portal research principles.
+`,
+  );
+  await writeFile(
+    join(root, "media", "push", "questions.yml"),
+    `questions:
+  - id: email-sensitive-detail
+    question: What sensitive detail is safe in email?
+    risk: Email can overexpose private account context.
+`,
+  );
+  await writeFile(
+    join(root, "media", "push", "composition.yml"),
+    `patterns:
+  - id: email-route-to-detail
+    pattern: Email previews route to authenticated detail.
+`,
+  );
+  await writeFile(
+    join(root, "media", "chat", "questions.yml"),
+    `questions:
+  - id: chat-explanation-depth
+    question: How much context should chat show inline?
+`,
+  );
   return root;
 }
 
