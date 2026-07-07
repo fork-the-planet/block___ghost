@@ -1,4 +1,4 @@
-import { cn } from "ghost-ui";
+import { cn } from "@design-intelligence/vessel";
 import type { ComponentProps } from "react";
 
 export function DocProse({

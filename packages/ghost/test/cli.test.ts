@@ -1,51 +1,11 @@
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml } from "yaml";
 import { buildCli } from "../src/cli.js";
-import { runDriftCheck } from "../src/drift-command.js";
-
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-
-const BASE_FINGERPRINT = `---
-id: local
-source: llm
-timestamp: 2026-04-24T00:00:00.000Z
-palette:
-  dominant:
-    - { role: primary, value: "#111111" }
-  neutrals: { steps: ["#ffffff", "#111111"], count: 2 }
-  semantic: []
-  saturationProfile: muted
-  contrast: high
-spacing: { scale: [4, 8, 16], baseUnit: 4, regularity: 1 }
-typography:
-  families: ["Inter"]
-  sizeRamp: [12, 16, 24]
-  weightDistribution: { 400: 1 }
-  lineHeightPattern: normal
-surfaces:
-  borderRadii: [4, 8]
-  shadowComplexity: deliberate-none
-  borderUsage: minimal
----
-
-# Character
-
-Quiet and direct.
-
-# Decisions
-
-### shape-language
-Use modest radii.
-`;
-
-function fingerprintWithId(id: string): string {
-  return BASE_FINGERPRINT.replace("id: local", `id: ${id}`);
-}
 
 async function runCli(
   argv: string[],
@@ -167,24 +127,21 @@ describe("ghost CLI", () => {
     expect(result.stdout).toContain("Core workflow");
     for (const command of [
       "init",
-      "scan",
-      "lint",
-      "verify",
-      "check",
+      "validate",
+      "gather",
+      "pull",
+      "pulse",
       "review",
-      "relay gather",
-      "emit",
+      "export",
+      "checks init",
       "skill install",
     ]) {
       expect(result.stdout).toContain(command);
     }
     expect(result.stdout).toContain("ghost --help --all");
-    expect(result.stdout).not.toContain("survey <op>");
-    expect(result.stdout).not.toContain("diff <a> <b>");
-    expect(result.stdout).not.toMatch(/\n {2}ack\s/);
-    expect(result.stdout).not.toContain("track <fingerprint>");
-    expect(result.stdout).not.toContain("diverge <dimension>");
-    expect(result.stdout).not.toContain("proposal <op>");
+    // Removed in the flat-corpus cleanup.
+    expect(result.stdout).not.toContain("migrate");
+    expect(result.stdout).not.toContain("relay");
   });
 
   it("prints the complete grouped command index with --help --all", async () => {
@@ -194,989 +151,235 @@ describe("ghost CLI", () => {
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("Core workflow");
-    expect(result.stdout).toContain("Advanced/package inspection");
-    expect(result.stdout).toContain("Compare/stance");
-    expect(result.stdout).toContain("Maintenance/legacy");
     for (const command of [
-      "lint [file]",
+      "validate [file]",
       "init",
-      "verify [dir]",
-      "scan [dir]",
-      "stack [paths...]",
-      "signals [path]",
-      "describe <fingerprint>",
-      "diff <a> <b>",
-      "survey <op> [...surveys]",
-      "relay <action> [target]",
-      "emit <kind>",
-      "compare [...fingerprints]",
-      "drift <action>",
-      "ack",
-      "track <fingerprint>",
-      "diverge <dimension>",
-      "skill <action>",
-      "check",
+      "gather [...ask]",
+      "pull <...ids>",
+      "pulse",
       "review",
+      "export",
+      "checks <action>",
+      "manifest",
+      "skill <action>",
     ]) {
       expect(result.stdout).toContain(command);
     }
+    // Removed in the flat-corpus cleanup.
+    expect(result.stdout).not.toContain("migrate");
   });
 
-  it("keeps command-specific --all help local to lint and verify", async () => {
-    const lint = await runCli(["lint", "--help"], dir, { allowNoExit: true });
-    const verify = await runCli(["verify", "--help"], dir, {
+  it("emits a self-describing JSON manifest of commands and flags", async () => {
+    const result = await runCli(["manifest", "--format", "json"], dir);
+
+    expect(result.code).toBe(0);
+    const manifest = JSON.parse(result.stdout);
+    expect(manifest.apiVersion).toBe(1);
+    expect(manifest.type).toBe("manifest");
+    expect(manifest.data.tool).toBe("ghost");
+
+    const names = manifest.data.commands.map(
+      (command: { name: string }) => command.name,
+    );
+    expect(names).toContain("gather");
+    expect(names).toContain("pulse");
+    expect(names).toContain("review");
+    expect(names).toContain("export");
+    expect(names).toContain("checks");
+    expect(names).toContain("manifest");
+
+    const gather = manifest.data.commands.find(
+      (command: { name: string }) => command.name === "gather",
+    );
+    expect(gather.group).toBe("core");
+    expect(typeof gather.summary).toBe("string");
+    expect(Array.isArray(gather.options)).toBe(true);
+
+    const globalNames = manifest.data.globalOptions.map(
+      (option: { name: string }) => option.name,
+    );
+    expect(globalNames).toContain("help");
+  });
+
+  it("rejects a non-json manifest format with a usage error", async () => {
+    const result = await runCli(["manifest", "--format", "text"], dir, {
       allowNoExit: true,
     });
 
-    expect(lint.code).toBe(0);
-    expect(lint.stdout).toContain("--all");
-    expect(lint.stdout).toContain("Validate every nested fingerprint package");
-    expect(lint.stdout).not.toContain("Core workflow");
-    expect(verify.code).toBe(0);
-    expect(verify.stdout).toContain("--all");
-    expect(verify.stdout).toContain("Verify every nested fingerprint package");
-    expect(verify.stdout).not.toContain("Core workflow");
-  });
-
-  it("compares explicitly supplied fingerprint files", async () => {
-    await writeFile(join(dir, "a.fingerprint.md"), fingerprintWithId("a"));
-    await writeFile(join(dir, "b.fingerprint.md"), fingerprintWithId("b"));
-
-    const result = await runCli(
-      ["compare", "a.fingerprint.md", "b.fingerprint.md"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Distance");
-  });
-
-  it("compares root fingerprint bundle directories", async () => {
-    await writeComparableBundle(join(dir, "a", ".ghost"), "sectioned-form");
-    await writeComparableBundle(join(dir, "b", ".ghost"), "data-table");
-
-    const result = await runCli(["compare", "a/.ghost", "b/.ghost"], dir);
-
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Distance");
-  });
-
-  it("track writes the neutral sync manifest shape", async () => {
-    await mkdir(join(dir, ".ghost"), { recursive: true });
-    await writeFile(
-      join(dir, ".ghost", "fingerprint.md"),
-      fingerprintWithId("local"),
-    );
-    await writeFile(
-      join(dir, "tracked.fingerprint.md"),
-      fingerprintWithId("tracked"),
-    );
-
-    const result = await runCli(["track", "tracked.fingerprint.md"], dir);
-    const manifest = JSON.parse(
-      await readFile(join(dir, ".ghost-sync.json"), "utf-8"),
-    ) as Record<string, unknown>;
-
-    expect(result.code).toBe(0);
-    expect(manifest.tracks).toEqual({
-      type: "path",
-      value: "tracked.fingerprint.md",
-    });
-    expect(manifest.trackedFingerprintId).toBe("tracked");
-    expect(manifest.localFingerprintId).toBe("local");
-    const legacyRelationFields = [
-      "parent",
-      ["parent", "FingerprintId"].join(""),
-      ["child", "FingerprintId"].join(""),
-    ];
-    for (const field of legacyRelationFields) {
-      expect(manifest).not.toHaveProperty(field);
-    }
-  });
-
-  it("track bootstraps the sync manifest for canonical fingerprint packages", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "tracked"), { checks: false });
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-
-    const track = await runCli(["track", "tracked/.ghost"], dir);
-    const check = await runCli(["drift", "check", "--format", "json"], dir);
-
-    expect(track.code).toBe(0);
-    const manifest = JSON.parse(
-      await readFile(join(dir, ".ghost-sync.json"), "utf-8"),
-    );
-    expect(manifest.tracks).toEqual({ type: "path", value: "tracked/.ghost" });
-    expect(manifest.trackedFingerprintId).toBe("tracked");
-    expect(manifest.localFingerprintId).toBe("local");
-    expect(check.code).toBe(0);
-    expect(JSON.parse(check.stdout).overall.verdict).toBe("covered");
-  });
-
-  it("ack and diverge write stance updates from the unified cli", async () => {
-    await mkdir(join(dir, ".ghost"), { recursive: true });
-    await writeFile(
-      join(dir, ".ghost", "fingerprint.md"),
-      fingerprintWithId("local"),
-    );
-    await writeFile(
-      join(dir, "tracked.fingerprint.md"),
-      fingerprintWithId("tracked"),
-    );
-    await writeFile(
-      join(dir, "ghost.config.js"),
-      "export default { tracks: './tracked.fingerprint.md' };\n",
-    );
-
-    const ack = await runCli(
-      [
-        "ack",
-        "--stance",
-        "aligned",
-        "--reason",
-        "baseline",
-        "--format",
-        "json",
-      ],
-      dir,
-    );
-    const diverge = await runCli(
-      ["diverge", "typography", "--reason", "editorial", "--format", "json"],
-      dir,
-    );
-
-    expect(ack.code).toBe(0);
-    expect(JSON.parse(ack.stdout).trackedFingerprintId).toBe("tracked");
-    expect(diverge.code).toBe(0);
-    const manifest = JSON.parse(diverge.stdout);
-    expect(manifest.dimensions.typography.stance).toBe("diverging");
-    expect(manifest.dimensions.typography.reason).toBe("editorial");
-  });
-
-  it("ack reads canonical fingerprint packages from config tracks", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "tracked"), { checks: false });
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeFile(
-      join(dir, "ghost.config.js"),
-      "export default { tracks: './tracked/.ghost' };\n",
-    );
-
-    const ack = await runCli(["ack", "--format", "json"], dir);
-
-    expect(ack.code).toBe(0);
-    const manifest = JSON.parse(ack.stdout);
-    expect(manifest.trackedFingerprintId).toBe("tracked");
-    expect(manifest.localFingerprintId).toBe("local");
-  });
-
-  it("ack preserves npm tracks that expose a .ghost fingerprint", async () => {
-    await mkdir(join(dir, ".ghost"), { recursive: true });
-    await writeFile(
-      join(dir, ".ghost", "fingerprint.md"),
-      fingerprintWithId("local"),
-    );
-    await mkdir(join(dir, "node_modules", "@scope", "tracked", ".ghost"), {
-      recursive: true,
-    });
-    await writeFile(
-      join(
-        dir,
-        "node_modules",
-        "@scope",
-        "tracked",
-        ".ghost",
-        "fingerprint.md",
-      ),
-      fingerprintWithId("tracked"),
-    );
-    await writeFile(
-      join(dir, "ghost.config.js"),
-      "export default { tracks: 'npm:@scope/tracked' };\n",
-    );
-
-    const ack = await runCli(["ack", "--format", "json"], dir);
-
-    expect(ack.code).toBe(0);
-    const manifest = JSON.parse(ack.stdout);
-    expect(manifest.tracks).toEqual({ type: "npm", value: "@scope/tracked" });
-    expect(manifest.trackedFingerprintId).toBe("tracked");
-    expect(manifest.localFingerprintId).toBe("local");
-  });
-
-  it("drift check resolves npm tracks that expose canonical fingerprint packages", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "node_modules", "@scope", "tracked"), {
-      checks: false,
-    });
-    await writeFile(
-      join(dir, "node_modules", "@scope", "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeFile(
-      join(dir, "ghost.config.js"),
-      "export default { tracks: 'npm:@scope/tracked' };\n",
-    );
-
-    const ack = await runCli(["ack", "--format", "json"], dir);
-    const check = await runCli(["drift", "check", "--format", "json"], dir);
-
-    expect(ack.code).toBe(0);
-    expect(check.code).toBe(0);
-    const report = JSON.parse(check.stdout);
-    expect(report.trackedFingerprintId).toBe("tracked");
-    expect(report.localFingerprintId).toBe("local");
-    expect(report.overall.verdict).toBe("covered");
-  });
-
-  it("omits removed design-loop status by default", async () => {
-    const result = await runCli(["drift", "status", "--format", "json"], dir);
-
-    expect(result.code).toBe(0);
-    const status = JSON.parse(result.stdout);
-    expect(status.schema).toBe("ghost.drift.status/v1");
-    expect(status.designLoop).toBeUndefined();
-  });
-
-  it("runs the Ghost-owned drift check contract through the stance ledger", async () => {
-    await mkdir(join(dir, ".ghost"), { recursive: true });
-    await writeFile(
-      join(dir, ".ghost", "fingerprint.md"),
-      fingerprintWithId("local"),
-    );
-    await writeFile(
-      join(dir, "tracked.fingerprint.md"),
-      fingerprintWithId("tracked"),
-    );
-    await writeFile(
-      join(dir, "ghost.config.js"),
-      "export default { tracks: './tracked.fingerprint.md' };\n",
-    );
-    await runCli(["track", "tracked.fingerprint.md"], dir);
-
-    const result = await runCli(["drift", "check", "--format", "json"], dir);
-
-    expect(result.code).toBe(0);
-    const report = JSON.parse(result.stdout);
-    expect(report.schema).toBe("ghost.drift.check/v1");
-    expect(report.designLoop).toBeUndefined();
-    expect(report.trackedFingerprintId).toBe("tracked");
-    expect(report.localFingerprintId).toBe("local");
-    expect(report.overall.verdict).toBe("covered");
-    expect(report.gate.schema).toBe("ghost.compare.gate/v1");
-  });
-
-  it("drift check prefers legacy fingerprint.md over survey cache identity", async () => {
-    await mkdir(join(dir, ".ghost"), { recursive: true });
-    await writeFile(
-      join(dir, ".ghost", "fingerprint.md"),
-      fingerprintWithId("local"),
-    );
-    await writeFile(
-      join(dir, ".ghost", "survey.json"),
-      JSON.stringify({
-        schema: "ghost.survey/v1",
-        sources: [
-          { id: "cache", target: ".", scanned_at: "2026-05-10T00:00:00Z" },
-        ],
-        values: [],
-        tokens: [],
-        components: [],
-        ui_surfaces: [],
-      }),
-    );
-    await writeFile(
-      join(dir, ".ghost", "patterns.yml"),
-      `schema: ghost.patterns/v1
-id: cache-local
-surface_types: []
-composition_patterns: []
-`,
-    );
-    await writeFile(
-      join(dir, "tracked.fingerprint.md"),
-      fingerprintWithId("tracked"),
-    );
-    await writeCoveredSyncManifest(dir, { tracked: "tracked.fingerprint.md" });
-
-    const result = await runCli(
-      [
-        "drift",
-        "check",
-        "--tracked",
-        "tracked.fingerprint.md",
-        "--format",
-        "json",
-      ],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const report = JSON.parse(result.stdout);
-    expect(report.localFingerprintId).toBe("local");
-    expect(report.trackedFingerprintId).toBe("tracked");
-  });
-
-  it("drift check loads canonical fingerprint packages", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "tracked"), { checks: false });
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeFile(
-      join(dir, ".ghost-sync.json"),
-      JSON.stringify({
-        tracks: { type: "path", value: "tracked/.ghost" },
-        ackedAt: "2026-06-16T00:00:00.000Z",
-        trackedFingerprintId: "tracked",
-        localFingerprintId: "local",
-        overallDistance: 0,
-        dimensions: {
-          spacing: {
-            distance: 0,
-            stance: "accepted",
-            ackedAt: "2026-06-16T00:00:00.000Z",
-          },
-          palette: {
-            distance: 0,
-            stance: "accepted",
-            ackedAt: "2026-06-16T00:00:00.000Z",
-          },
-          typography: {
-            distance: 0,
-            stance: "accepted",
-            ackedAt: "2026-06-16T00:00:00.000Z",
-          },
-          surfaces: {
-            distance: 0,
-            stance: "accepted",
-            ackedAt: "2026-06-16T00:00:00.000Z",
-          },
-          decisions: {
-            distance: 0,
-            stance: "accepted",
-            ackedAt: "2026-06-16T00:00:00.000Z",
-          },
-        },
-      }),
-    );
-
-    const result = await runCli(
-      [
-        "drift",
-        "check",
-        "--package",
-        ".ghost",
-        "--tracked",
-        "tracked/.ghost",
-        "--format",
-        "json",
-      ],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const report = JSON.parse(result.stdout);
-    expect(report.schema).toBe("ghost.drift.check/v1");
-    expect(report.trackedFingerprintId).toBe("tracked");
-    expect(report.localFingerprintId).toBe("local");
-  });
-
-  it("drift check uses ledger tracks when no config is present", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "tracked"), { checks: false });
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeCoveredSyncManifest(dir, { tracked: "tracked/.ghost" });
-
-    const result = await runCli(["drift", "check", "--format", "json"], dir);
-
-    expect(result.code).toBe(0);
-    const report = JSON.parse(result.stdout);
-    expect(report.trackedFingerprintId).toBe("tracked");
-    expect(report.localFingerprintId).toBe("local");
-  });
-
-  it("drift check resolves config tracks that point at canonical packages", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "tracked"), { checks: false });
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeFile(
-      join(dir, "ghost.config.js"),
-      "export default { tracks: './tracked/.ghost' };\n",
-    );
-    await writeCoveredSyncManifest(dir, { tracked: "tracked/.ghost" });
-
-    const result = await runCli(["drift", "check", "--format", "json"], dir);
-
-    expect(result.code).toBe(0);
-    const report = JSON.parse(result.stdout);
-    expect(report.trackedFingerprintId).toBe("tracked");
-    expect(report.localFingerprintId).toBe("local");
-  });
-
-  it("runDriftCheck resolves config tracks relative to the supplied cwd", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "tracked"), { checks: false });
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeFile(
-      join(dir, "ghost.config.js"),
-      "export default { tracks: 'tracked/.ghost' };\n",
-    );
-    await writeCoveredSyncManifest(dir, { tracked: "tracked/.ghost" });
-
-    const report = await runDriftCheck({ cwd: dir, config: "ghost.config.js" });
-
-    expect(report.trackedFingerprintId).toBe("tracked");
-    expect(report.localFingerprintId).toBe("local");
-    expect(report.overall.verdict).toBe("covered");
-  });
-
-  it("drift check resolves tracked canonical package manifest paths", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "tracked"), { checks: false });
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeCoveredSyncManifest(dir, { tracked: "tracked/.ghost" });
-
-    const result = await runCli(
-      [
-        "drift",
-        "check",
-        "--tracked",
-        "tracked/.ghost/manifest.yml",
-        "--format",
-        "json",
-      ],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const report = JSON.parse(result.stdout);
-    expect(report.trackedFingerprintId).toBe("tracked");
-    expect(report.localFingerprintId).toBe("local");
-  });
-
-  it("drift check rejects tracked fingerprints that do not match the ledger", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "tracked"), { checks: false });
-    await writeCheckPackage(join(dir, "other"), { checks: false });
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeFile(
-      join(dir, "other", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: other\n",
-    );
-    await writeCoveredSyncManifest(dir, { tracked: "tracked/.ghost" });
-
-    const result = await runCli(
-      ["drift", "check", "--tracked", "other/.ghost", "--format", "json"],
-      dir,
-    );
-
     expect(result.code).toBe(2);
-    expect(result.stderr).toContain(
-      'sync manifest tracks fingerprint "tracked" but resolved tracked fingerprint "other"',
-    );
+    expect(result.stderr).toContain("--format json");
   });
 
-  it("drift check reports uncovered canonical package changes", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeCheckPackage(join(dir, "tracked"), { checks: false });
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeFile(
-      join(dir, ".ghost", "intent.yml"),
-      `summary:
-  product: Cash iOS
-situations: []
-principles:
-  - id: tokenized-ui-color
-    principle: Use celebratory spring motion and playful transitions throughout lending.
-experience_contracts: []
-`,
-    );
-    await writeCoveredSyncManifest(dir, { tracked: "tracked/.ghost" });
-
-    const result = await runCli(["drift", "check", "--format", "json"], dir);
-
-    expect(result.code).toBe(1);
-    const report = JSON.parse(result.stdout);
-    expect(report.overall.verdict).toBe("uncovered");
-    expect(report.dimensions.decisions.verdict).toBe("uncovered");
-  });
-
-  it("drift check reports digest-only canonical package changes", async () => {
-    const manyPrinciples = Array.from(
-      { length: 30 },
-      (_, index) => `    - id: principle-${index + 1}
-      principle: Preserve durable product surface rule ${index + 1}.
-`,
-    ).join("");
-    const fingerprintRaw = `schema: ghost.fingerprint/v1
-intent:
-  summary:
-    product: Cash iOS
-  situations: []
-  principles:
-${manyPrinciples}  experience_contracts: []
-inventory:
-  topology:
-    surface_types: [native-feature]
-  building_blocks: {}
-  exemplars: []
-  sources: []
-composition:
-  patterns: []
-`;
-    await mkdir(join(dir, ".ghost"), { recursive: true });
-    await mkdir(join(dir, "tracked", ".ghost"), { recursive: true });
-    await writeSplitFingerprintPackage(join(dir, ".ghost"), fingerprintRaw);
-    await writeSplitFingerprintPackage(
-      join(dir, "tracked", ".ghost"),
-      fingerprintRaw,
-    );
-    await writeFile(
-      join(dir, "tracked", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: tracked\n",
-    );
-    await writeFile(
-      join(dir, ".ghost", "inventory.yml"),
-      `topology:
-  surface_types: [native-feature, digest-only-change]
-building_blocks: {}
-exemplars: []
-sources: []
-`,
-    );
-    await writeCoveredSyncManifest(dir, { tracked: "tracked/.ghost" });
-
-    const result = await runCli(["drift", "check", "--format", "json"], dir);
-
-    expect(result.code).toBe(1);
-    const report = JSON.parse(result.stdout);
-    expect(report.overall.verdict).toBe("uncovered");
-    expect(report.dimensions.decisions.verdict).toBe("uncovered");
-  });
-
-  it("exits with uncovered drift when current distance exceeds the stance ledger", async () => {
-    await mkdir(join(dir, ".ghost"), { recursive: true });
-    await writeFile(
-      join(dir, ".ghost", "fingerprint.md"),
-      fingerprintWithId("local"),
-    );
-    await writeFile(
-      join(dir, "tracked.fingerprint.md"),
-      fingerprintWithId("tracked"),
-    );
-    await runCli(["track", "tracked.fingerprint.md"], dir);
-    await writeFile(
-      join(dir, ".ghost", "fingerprint.md"),
-      fingerprintWithId("local").replace(
-        "spacing: { scale: [4, 8, 16], baseUnit: 4, regularity: 1 }",
-        "spacing: { scale: [2, 3, 5, 7, 11, 13], baseUnit: 2, regularity: 0.1 }",
-      ),
-    );
-
-    const result = await runCli(
-      [
-        "drift",
-        "check",
-        "--tracked",
-        "tracked.fingerprint.md",
-        "--format",
-        "json",
-      ],
-      dir,
-    );
-
-    expect(result.code).toBe(1);
-    const report = JSON.parse(result.stdout);
-    expect(report.schema).toBe("ghost.drift.check/v1");
-    expect(report.overall.verdict).toBe("uncovered");
-    expect(report.dimensions.spacing.verdict).toBe("uncovered");
-  });
-
-  it("initializes the default fingerprint package without cache", async () => {
+  it("initializes the default steering fingerprint package", async () => {
     const init = await runCli(["init", "--format", "json"], dir);
-    const scan = await runCli(["scan", "--format", "json"], dir);
-    await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch("let color = CashTheme.primary"),
+
+    expect(init.code).toBe(0);
+    const initOutput = JSON.parse(init.stdout);
+    expect(Object.keys(initOutput).sort()).toEqual(["dir", "written"]);
+    expect(initOutput.written).toContain("manifest.yml");
+    expect(initOutput.written).toContain("glossary.md");
+    expect(initOutput.written).toContain("index.md");
+    expect(initOutput.written).toContain("principle.stance.md");
+    expect(initOutput.written).toContain("principle.composition.md");
+    expect(initOutput.written).toContain(
+      "anti-goal.generic-generated-output.md",
+    );
+    expect(initOutput.written).toContain("pattern.status-with-next-step.md");
+    expect(initOutput.written).toContain("exemplar.annotated-reference.md");
+    expect(initOutput.written).toContain("asset.materials.md");
+    expect(initOutput.written).toContain("decision.tradeoff.md");
+    // Core init is fingerprint-only: checks are opt-in via --with / checks init.
+    expect(initOutput.written).not.toContain("checks/example.md.example");
+    await expect(
+      readFile(join(dir, ".ghost", "manifest.yml"), "utf-8"),
+    ).resolves.toContain("schema: ghost.fingerprint-package/v1");
+
+    const index = await readFile(join(dir, ".ghost", "index.md"), "utf-8");
+    expect(index).toContain(
+      "Everything in this starter package is demo content",
+    );
+    expect(index).toContain(
+      "replace the claims, paths, examples, and decisions",
+    );
+
+    const validate = await runCli(["validate"], dir);
+    expect(validate.code).toBe(0);
+  });
+
+  it("initializes the minimal fingerprint package", async () => {
+    const init = await runCli(
+      ["init", "--template", "minimal", "--format", "json"],
+      dir,
     );
 
     expect(init.code).toBe(0);
     const initOutput = JSON.parse(init.stdout);
-    expect(Object.keys(initOutput).sort()).toEqual([
-      "checks",
-      "composition",
-      "dir",
-      "intent",
-      "inventory",
-      "manifest",
-    ]);
-    await expect(
-      readFile(join(dir, ".ghost", "manifest.yml"), "utf-8"),
-    ).resolves.toContain("schema: ghost.fingerprint-package/v1");
-    await expect(
-      readFile(join(dir, ".ghost", "validate.yml"), "utf-8"),
-    ).resolves.toContain("schema: ghost.validate/v1");
-    const status = JSON.parse(scan.stdout);
-    expect(status.cache).toBeUndefined();
+    expect(initOutput.written).toContain("manifest.yml");
+    expect(initOutput.written).toContain("glossary.md");
+    expect(initOutput.written).toContain("index.md");
+    expect(initOutput.written).not.toContain("principle.stance.md");
+    expect(initOutput.written).not.toContain("decision.tradeoff.md");
 
-    const lint = await runCli(["lint"], dir);
-    const verify = await runCli(["verify", ".ghost", "--root", "."], dir);
-    const check = await runCli(["check", "--diff", "change.patch"], dir);
-    const review = await runCli(["review", "--diff", "change.patch"], dir);
-    const reviewCommand = await runCli(["emit", "review-command"], dir);
-
-    expect(lint.code).toBe(0);
-    expect(verify.code).toBe(0);
-    expect(check.code).toBe(0);
-    expect(review.code).toBe(0);
-    expect(review.stdout).toContain("## Selected Context");
-    expect(reviewCommand.code).toBe(0);
+    const validate = await runCli(["validate"], dir);
+    expect(validate.code).toBe(0);
   });
 
-  it("init --monorepo detects package.json array workspaces without creating children by default", async () => {
-    await mkdir(join(dir, "apps", "checkout"), { recursive: true });
-    await writeFile(
-      join(dir, "package.json"),
-      JSON.stringify({ workspaces: ["apps/*"] }, null, 2),
-    );
-    await writeFile(
-      join(dir, "apps", "checkout", "package.json"),
-      JSON.stringify({ name: "checkout" }, null, 2),
+  it("keeps default as an alias for the steering template", async () => {
+    const init = await runCli(
+      ["init", "--template", "default", "--format", "json"],
+      dir,
     );
 
+    expect(init.code).toBe(0);
+    const initOutput = JSON.parse(init.stdout);
+    expect(initOutput.written).toContain("principle.stance.md");
+    expect(initOutput.written).toContain("decision.tradeoff.md");
+
+    const validate = await runCli(["validate"], dir);
+    expect(validate.code).toBe(0);
+  });
+
+  it("initializes the composition starter template", async () => {
+    const init = await runCli(
+      ["init", "--template", "composition", "--format", "json"],
+      dir,
+    );
+
+    expect(init.code).toBe(0);
+    const initOutput = JSON.parse(init.stdout);
+    expect(initOutput.written).toContain("manifest.yml");
+    expect(initOutput.written).toContain("glossary.md");
+    expect(initOutput.written).toContain("index.md");
+    expect(initOutput.written).toContain("principle.composition.md");
+    expect(initOutput.written).toContain("pattern.status-with-next-step.md");
+
+    // The scaffolded package is valid as written.
+    const validate = await runCli(["validate"], dir);
+    expect(validate.code).toBe(0);
+
+    // The ladder nodes surface in the gather menu with their kinds.
+    const gather = await runCli(["gather", "--format", "json"], dir);
+    expect(gather.code).toBe(0);
+    const menu = JSON.parse(gather.stdout);
+    const ids = menu.nodes.map((node: { id: string }) => node.id);
+    expect(ids).toContain("principle.composition");
+    expect(ids).toContain("pattern.status-with-next-step");
+    const pattern = menu.nodes.find(
+      (node: { id: string }) => node.id === "pattern.status-with-next-step",
+    );
+    expect(pattern.kind).toBe("pattern");
+
+    // The pattern body carries the bound/open/refines convention.
+    const pull = await runCli(["pull", "pattern.status-with-next-step"], dir);
+    expect(pull.code).toBe(0);
+    expect(pull.stdout).toContain("Bound (decided");
+    expect(pull.stdout).toContain("Open (your call");
+    expect(pull.stdout).toContain("principle.composition");
+  });
+
+  it("initializes the steering starter template", async () => {
+    const init = await runCli(
+      ["init", "--template", "steering", "--format", "json"],
+      dir,
+    );
+
+    expect(init.code).toBe(0);
+    const initOutput = JSON.parse(init.stdout);
+    expect(initOutput.written).toContain("manifest.yml");
+    expect(initOutput.written).toContain("glossary.md");
+    expect(initOutput.written).toContain("index.md");
+    expect(initOutput.written).toContain("principle.stance.md");
+    expect(initOutput.written).toContain("principle.composition.md");
+    expect(initOutput.written).toContain(
+      "anti-goal.generic-generated-output.md",
+    );
+    expect(initOutput.written).toContain("pattern.status-with-next-step.md");
+    expect(initOutput.written).toContain("exemplar.annotated-reference.md");
+    expect(initOutput.written).toContain("asset.materials.md");
+    expect(initOutput.written).toContain("decision.tradeoff.md");
+    expect(initOutput.written).not.toContain("concept.scoped-direction.md");
+
+    const validate = await runCli(["validate"], dir);
+    expect(validate.code).toBe(0);
+
+    const gather = await runCli(["gather", "--format", "json"], dir);
+    expect(gather.code).toBe(0);
+    const menu = JSON.parse(gather.stdout);
+    const ids = menu.nodes.map((node: { id: string }) => node.id);
+    expect(ids).toContain("principle.stance");
+    expect(ids).toContain("principle.composition");
+    expect(ids).toContain("anti-goal.generic-generated-output");
+    expect(ids).toContain("pattern.status-with-next-step");
+    expect(ids).toContain("exemplar.annotated-reference");
+    expect(ids).toContain("asset.materials");
+    expect(ids).toContain("decision.tradeoff");
+
+    const antiGoal = menu.nodes.find(
+      (node: { id: string }) =>
+        node.id === "anti-goal.generic-generated-output",
+    );
+    expect(antiGoal.kind).toBe("anti-goal");
+    const decision = menu.nodes.find(
+      (node: { id: string }) => node.id === "decision.tradeoff",
+    );
+    expect(decision.kind).toBe("decision");
+    expect(menu.kinds.map((kind: { name: string }) => kind.name)).toContain(
+      "concept",
+    );
+  });
+
+  it("rejects an unknown init template with a usage error", async () => {
     const result = await runCli(
-      ["init", "--monorepo", "--format", "json"],
+      ["init", "--template", "nope", "--format", "json"],
       dir,
+      { allowNoExit: true },
     );
 
-    expect(result.code).toBe(0);
-    const out = JSON.parse(result.stdout);
-    expect(out.mode).toBe("plan");
-    expect(out.candidates).toEqual([
-      {
-        path: "apps/checkout",
-        source: "package-json",
-        packageJson: "apps/checkout/package.json",
-        state: "candidate",
-      },
-    ]);
-    expect(out.commands).toEqual(["ghost init --scope apps/checkout"]);
-    await expect(
-      readFile(join(dir, ".ghost", "manifest.yml"), "utf-8"),
-    ).resolves.toContain("ghost.fingerprint-package/v1");
-    await expect(
-      readFile(
-        join(dir, "apps", "checkout", ".ghost", "manifest.yml"),
-        "utf-8",
-      ),
-    ).rejects.toThrow();
-  });
-
-  it("init --monorepo detects pnpm workspace packages", async () => {
-    await mkdir(join(dir, "packages", "admin"), { recursive: true });
-    await writeFile(
-      join(dir, "pnpm-workspace.yaml"),
-      "packages:\n  - packages/*\n",
-    );
-    await writeFile(
-      join(dir, "packages", "admin", "package.json"),
-      JSON.stringify({ name: "admin" }, null, 2),
-    );
-
-    const result = await runCli(
-      ["init", "--monorepo", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout).candidates).toEqual([
-      {
-        path: "packages/admin",
-        source: "pnpm-workspace",
-        packageJson: "packages/admin/package.json",
-        state: "candidate",
-      },
-    ]);
-  });
-
-  it("init --monorepo expands recursive workspace globs", async () => {
-    await mkdir(join(dir, "packages", "group", "admin"), {
-      recursive: true,
-    });
-    await writeFile(
-      join(dir, "pnpm-workspace.yaml"),
-      "packages:\n  - packages/**\n",
-    );
-    await writeFile(
-      join(dir, "packages", "group", "admin", "package.json"),
-      JSON.stringify({ name: "admin" }, null, 2),
-    );
-
-    const result = await runCli(
-      ["init", "--monorepo", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout).candidates).toEqual([
-      {
-        path: "packages/group/admin",
-        source: "pnpm-workspace",
-        packageJson: "packages/group/admin/package.json",
-        state: "candidate",
-      },
-    ]);
-  });
-
-  it("init --monorepo expands brace workspace globs", async () => {
-    await mkdir(join(dir, "apps", "checkout"), { recursive: true });
-    await mkdir(join(dir, "packages", "admin"), { recursive: true });
-    await writeFile(
-      join(dir, "pnpm-workspace.yaml"),
-      "packages:\n  - '{apps,packages}/*'\n",
-    );
-    await writeFile(
-      join(dir, "apps", "checkout", "package.json"),
-      JSON.stringify({ name: "checkout" }, null, 2),
-    );
-    await writeFile(
-      join(dir, "packages", "admin", "package.json"),
-      JSON.stringify({ name: "admin" }, null, 2),
-    );
-
-    const result = await runCli(
-      ["init", "--monorepo", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout).candidates).toEqual([
-      {
-        path: "apps/checkout",
-        source: "pnpm-workspace",
-        packageJson: "apps/checkout/package.json",
-        state: "candidate",
-      },
-      {
-        path: "packages/admin",
-        source: "pnpm-workspace",
-        packageJson: "packages/admin/package.json",
-        state: "candidate",
-      },
-    ]);
-  });
-
-  it("init --monorepo honors negated workspace globs", async () => {
-    await mkdir(join(dir, "packages", "admin"), { recursive: true });
-    await mkdir(join(dir, "packages", "fixtures", "example"), {
-      recursive: true,
-    });
-    await writeFile(
-      join(dir, "pnpm-workspace.yaml"),
-      "packages:\n  - packages/**\n  - '!packages/fixtures/**'\n",
-    );
-    await writeFile(
-      join(dir, "packages", "admin", "package.json"),
-      JSON.stringify({ name: "admin" }, null, 2),
-    );
-    await writeFile(
-      join(dir, "packages", "fixtures", "example", "package.json"),
-      JSON.stringify({ name: "example" }, null, 2),
-    );
-
-    const result = await runCli(
-      ["init", "--monorepo", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout).candidates).toEqual([
-      {
-        path: "packages/admin",
-        source: "pnpm-workspace",
-        packageJson: "packages/admin/package.json",
-        state: "candidate",
-      },
-    ]);
-  });
-
-  it("init --monorepo --apply creates detected child packages", async () => {
-    await mkdir(join(dir, "apps", "checkout"), { recursive: true });
-    await writeFile(
-      join(dir, "package.json"),
-      JSON.stringify({ workspaces: { packages: ["apps/*"] } }, null, 2),
-    );
-    await writeFile(
-      join(dir, "apps", "checkout", "package.json"),
-      JSON.stringify({ name: "checkout" }, null, 2),
-    );
-
-    const result = await runCli(
-      ["init", "--monorepo", "--apply", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const out = JSON.parse(result.stdout);
-    expect(out.mode).toBe("apply");
-    expect(out.created.map((entry: { path: string }) => entry.path)).toEqual([
-      "apps/checkout",
-    ]);
-    await expect(
-      readFile(
-        join(dir, "apps", "checkout", ".ghost", "manifest.yml"),
-        "utf-8",
-      ),
-    ).resolves.toContain("ghost.fingerprint-package/v1");
-  });
-
-  it("init --monorepo --apply skips existing child packages without force", async () => {
-    await mkdir(join(dir, "apps", "checkout"), { recursive: true });
-    await writeFile(
-      join(dir, "package.json"),
-      JSON.stringify({ workspaces: ["apps/*"] }, null, 2),
-    );
-    await writeFile(
-      join(dir, "apps", "checkout", "package.json"),
-      JSON.stringify({ name: "checkout" }, null, 2),
-    );
-    await runCli(["init", "--scope", "apps/checkout"], dir);
-
-    const result = await runCli(
-      ["init", "--monorepo", "--apply", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const out = JSON.parse(result.stdout);
-    expect(out.created).toEqual([]);
-    expect(out.skipped).toEqual([
-      {
-        path: "apps/checkout",
-        source: "package-json",
-        packageJson: "apps/checkout/package.json",
-        state: "exists",
-      },
-    ]);
-  });
-
-  it("init --monorepo applies GHOST_PACKAGE_DIR to root and child packages", async () => {
-    await mkdir(join(dir, "apps", "checkout"), { recursive: true });
-    await writeFile(
-      join(dir, "package.json"),
-      JSON.stringify({ workspaces: ["apps/*"] }, null, 2),
-    );
-    await writeFile(
-      join(dir, "apps", "checkout", "package.json"),
-      JSON.stringify({ name: "checkout" }, null, 2),
-    );
-
-    const result = await runCli(
-      ["init", "--monorepo", "--apply", "--format", "json"],
-      dir,
-      { env: { GHOST_PACKAGE_DIR: ".design/memory" } },
-    );
-
-    expect(result.code).toBe(0);
-    const out = JSON.parse(result.stdout);
-    expect(out.ghostDir).toBe(".design/memory");
-    expect(out.commands).toEqual([
-      "GHOST_PACKAGE_DIR=.design/memory ghost init --scope apps/checkout",
-    ]);
-    await expect(
-      readFile(join(dir, ".design", "memory", "manifest.yml"), "utf-8"),
-    ).resolves.toContain("ghost.fingerprint-package/v1");
-    await expect(
-      readFile(
-        join(dir, "apps", "checkout", ".design", "memory", "manifest.yml"),
-        "utf-8",
-      ),
-    ).resolves.toContain("ghost.fingerprint-package/v1");
-  });
-
-  it("init --monorepo uses GHOST_PACKAGE_DIR for root and child packages", async () => {
-    await mkdir(join(dir, "apps", "checkout"), { recursive: true });
-    await writeFile(
-      join(dir, "package.json"),
-      JSON.stringify({ workspaces: ["apps/*"] }, null, 2),
-    );
-    await writeFile(
-      join(dir, "apps", "checkout", "package.json"),
-      JSON.stringify({ name: "checkout" }, null, 2),
-    );
-
-    const result = await runCli(
-      ["init", "--monorepo", "--apply", "--format", "json"],
-      dir,
-      { env: { GHOST_PACKAGE_DIR: ".agents/ghost" } },
-    );
-
-    expect(result.code).toBe(0);
-    const out = JSON.parse(result.stdout);
-    expect(out.ghostDir).toBe(".agents/ghost");
-    expect(out.commands).toEqual([
-      "GHOST_PACKAGE_DIR=.agents/ghost ghost init --scope apps/checkout",
-    ]);
-    await expect(
-      readFile(join(dir, ".agents", "ghost", "manifest.yml"), "utf-8"),
-    ).resolves.toContain("ghost.fingerprint-package/v1");
-    await expect(
-      readFile(
-        join(dir, "apps", "checkout", ".agents", "ghost", "manifest.yml"),
-        "utf-8",
-      ),
-    ).resolves.toContain("ghost.fingerprint-package/v1");
-  });
-
-  it("init --monorepo rejects exact scope and dir combinations", async () => {
-    const withPackage = await runCli(
-      ["init", "--package", "custom-dir", "--monorepo"],
-      dir,
-    );
-    const withScope = await runCli(
-      ["init", "--scope", "apps/checkout", "--monorepo"],
-      dir,
-    );
-    const withApplyOnly = await runCli(["init", "--apply"], dir);
-
-    expect(withPackage.code).toBe(2);
-    expect(withPackage.stderr).toContain(
-      "use either init --package <dir> or init --monorepo",
-    );
-    expect(withScope.code).toBe(2);
-    expect(withScope.stderr).toContain(
-      "use either init --scope <path> or init --monorepo",
-    );
-    expect(withApplyOnly.code).toBe(2);
-    expect(withApplyOnly.stderr).toContain(
-      "--apply can only be used with --monorepo",
-    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("Unknown init template 'nope'");
+    expect(result.stderr).toContain("minimal");
+    expect(result.stderr).toContain("composition");
+    expect(result.stderr).toContain("steering");
   });
 
   it("uses GHOST_PACKAGE_DIR as the default fingerprint package directory for init", async () => {
@@ -1244,26 +447,43 @@ sources: []
     expect(init.stderr).toContain("GHOST_PACKAGE_DIR must not contain");
   });
 
-  it("uses GHOST_PACKAGE_DIR as the default package lookup for scan", async () => {
+  it("exits 2 for a usage error surfaced by a thrown UsageError", async () => {
+    // A bad flag value is a usage error even when it throws from deep in a
+    // helper, not an unexpected crash: it must exit 2, not 1.
+    const bad = await runCli(["skill", "install", "--agent", "nope"], dir, {
+      allowNoExit: true,
+    });
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain("--agent must be one of");
+    // Goose is a first-class install destination.
+    expect(bad.stderr).toContain("goose");
+  });
+
+  it("exits 2 with guidance when no fingerprint package is present", async () => {
+    // A missing package is a usage error (run `ghost init`), not a raw crash.
+    const result = await runCli(["gather"], dir, {
+      allowNoExit: true,
+    });
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("No Ghost fingerprint package found");
+  });
+
+  it("uses GHOST_PACKAGE_DIR as the default package lookup for validate", async () => {
     await runCli(["init", "--package", ".agents/ghost"], dir);
 
-    const scan = await runCli(["scan", "--format", "json"], dir, {
+    const validate = await runCli(["validate", "--format", "json"], dir, {
       env: { GHOST_PACKAGE_DIR: ".agents/ghost" },
     });
 
-    expect(scan.code).toBe(0);
-    const status = JSON.parse(scan.stdout);
-    expect(await realpath(status.dir)).toBe(
-      await realpath(join(dir, ".agents", "ghost")),
-    );
-    expect(status.fingerprint.state).toBe("present");
+    expect(validate.code).toBe(0);
+    expect(JSON.parse(validate.stdout).errors).toBe(0);
   });
 
   it("refuses to overwrite existing fingerprint files unless forced", async () => {
-    await runCli(["init"], dir);
+    await runCli(["init", "--template", "minimal"], dir);
     await writeFile(
-      join(dir, ".ghost", "intent.yml"),
-      "summary:\n  product: Curated Surface\n",
+      join(dir, ".ghost", "index.md"),
+      "---\n---\n\nCurated Surface voice.\n",
     );
 
     const refused = await runCli(["init"], dir);
@@ -1273,135 +493,29 @@ sources: []
       "Refusing to overwrite existing Ghost fingerprint file(s)",
     );
     await expect(
-      readFile(join(dir, ".ghost", "intent.yml"), "utf-8"),
+      readFile(join(dir, ".ghost", "index.md"), "utf-8"),
     ).resolves.toContain("Curated Surface");
 
     const forced = await runCli(["init", "--force"], dir);
 
     expect(forced.code).toBe(0);
     await expect(
-      readFile(join(dir, ".ghost", "intent.yml"), "utf-8"),
-    ).resolves.toContain("summary: {}");
-  });
-
-  it("warns for checks grounded in omitted sparse fingerprint refs", async () => {
-    await runCli(["init"], dir);
-    await writeFile(
-      join(dir, ".ghost", "validate.yml"),
-      `schema: ghost.validate/v1
-id: local
-checks:
-  - id: missing-fingerprint-check
-    title: Missing fingerprint check
-    status: active
-    severity: serious
-    derivation:
-      intent: [intent.principle:not-recorded]
-    applies_to:
-      paths: [Code/Features/Lending]
-    detector:
-      type: forbidden-regex
-      pattern: '#[0-9a-fA-F]{3,8}'
-    evidence:
-      support: 0.94
-      observed_count: 47
-      examples:
-        - Code/Features/Lending/LendingUI
-`,
-    );
-
-    const lint = await runCli(["lint", ".ghost", "--format", "json"], dir);
-
-    expect(lint.code).toBe(0);
-    const report = JSON.parse(lint.stdout);
-    expect(report.issues[0]).toMatchObject({
-      severity: "warning",
-      rule: "check-grounding-unknown",
-      path: "validate.yml.checks[0].derivation.intent[0]",
-    });
-  });
-
-  it("validates standalone validate.yml derivation refs with a valid sibling fingerprint", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeFile(
-      join(dir, ".ghost", "validate.yml"),
-      checksFileWithDerivation("intent.principle:not-recorded"),
-    );
-
-    const lint = await runCli(
-      ["lint", ".ghost/validate.yml", "--format", "json"],
-      dir,
-    );
-
-    expect(lint.code).toBe(0);
-    const report = JSON.parse(lint.stdout);
-    expect(report.issues[0]).toMatchObject({
-      severity: "warning",
-      rule: "check-grounding-unknown",
-      path: "checks[0].derivation.intent[0]",
-    });
-    expect(report.issues).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ rule: "check-grounding-unverified" }),
-      ]),
-    );
-  });
-
-  it("marks standalone validate.yml grounding unverified when no sibling fingerprint exists", async () => {
-    await writeFile(
-      join(dir, "validate.yml"),
-      checksFileWithDerivation("intent.principle:tokenized-ui-color"),
-    );
-
-    const lint = await runCli(
-      ["lint", "validate.yml", "--format", "json"],
-      dir,
-    );
-
-    expect(lint.code).toBe(0);
-    const report = JSON.parse(lint.stdout);
-    expect(report.info).toBe(1);
-    expect(report.issues[0]).toMatchObject({
-      severity: "info",
-      rule: "check-grounding-unverified",
-      path: "checks[0].derivation",
-    });
-  });
-
-  it("keeps standalone validate.yml lint non-blocking when the sibling fingerprint is invalid", async () => {
-    await mkdir(join(dir, ".ghost"), { recursive: true });
-    await writeFile(join(dir, ".ghost", "manifest.yml"), "not: draft\n");
-    await writeFile(
-      join(dir, ".ghost", "validate.yml"),
-      checksFileWithDerivation("intent.principle:tokenized-ui-color"),
-    );
-
-    const lint = await runCli(
-      ["lint", ".ghost/validate.yml", "--format", "json"],
-      dir,
-    );
-
-    expect(lint.code).toBe(0);
-    const report = JSON.parse(lint.stdout);
-    expect(report.issues[0]).toMatchObject({
-      severity: "info",
-      rule: "check-grounding-unverified",
-      path: "checks[0].derivation",
-    });
+      readFile(join(dir, ".ghost", "index.md"), "utf-8"),
+    ).resolves.toContain("Everything in this starter package is demo content");
   });
 
   it("does not guess arbitrary YAML files are validate.yml", async () => {
     await writeFile(join(dir, "workflow.yml"), "name: ci\non: push\n");
 
     const lint = await runCli(
-      ["lint", "workflow.yml", "--format", "json"],
+      ["validate", "workflow.yml", "--format", "json"],
       dir,
     );
 
     expect(lint.code).toBe(1);
     expect(JSON.parse(lint.stdout).issues[0]).toMatchObject({
       severity: "error",
-      rule: "unsupported-yaml",
+      rule: "unsupported-artifact",
     });
   });
 
@@ -1412,7 +526,7 @@ checks:
     );
 
     const lint = await runCli(
-      ["lint", "package-anchor.yml", "--format", "json"],
+      ["validate", "package-anchor.yml", "--format", "json"],
       dir,
     );
 
@@ -1420,46 +534,22 @@ checks:
     expect(JSON.parse(lint.stdout).errors).toBe(0);
   });
 
-  it("initializes a bundle and reports fingerprint capture state as json", async () => {
+  it("initializes a bundle with manifest and starter index node", async () => {
     const init = await runCli(["init"], dir);
-    const scan = await runCli(["scan", "--format", "json"], dir);
-    const scanHuman = await runCli(["scan"], dir);
 
     expect(init.code).toBe(0);
-    expect(init.stdout).toContain("manifest.yml:");
-    expect(init.stdout).toContain("intent.yml:");
-    expect(init.stdout).toContain("inventory.yml:");
-    expect(init.stdout).toContain("composition.yml:");
-    expect(init.stdout).toContain("validate.yml:");
+    expect(init.stdout).toContain("manifest.yml");
+    expect(init.stdout).toContain("glossary.md");
+    expect(init.stdout).toContain("index.md");
     expect(init.stdout).not.toContain("cache/:");
     expect(init.stdout).not.toContain("memory/intent.md:");
     expect(
       await readFile(join(dir, ".ghost", "manifest.yml"), "utf-8"),
     ).toContain("schema: ghost.fingerprint-package/v1");
-    expect(scan.code).toBe(0);
-    const status = JSON.parse(scan.stdout);
-    expect(status.fingerprint.state).toBe("present");
-    expect(status.proposals).toBeUndefined();
-    expect(status.cache).toBeUndefined();
-    expect(status.intent).toBeUndefined();
-    expect(status.readiness).toBeUndefined();
-    expect(status.checks).toBeUndefined();
-    expect(status.validate.state).toBe("present");
-    expect(status.contribution.state).toBe("empty");
-    expect(status.contribution.contributing_facets).toEqual([]);
-    expect(status.contribution.empty_facets).toEqual([
-      "intent",
-      "inventory",
-      "composition",
-      "validate",
-    ]);
-    expect(scanHuman.stdout).toContain("package dir:");
-    expect(scanHuman.stdout).toContain("contribution: empty");
-    expect(scanHuman.stdout).toContain("intent: empty (0)");
-    expect(scanHuman.stdout).toContain("validate: empty (0)");
-    expect(scanHuman.stdout).not.toContain("readiness:");
-    expect(scanHuman.stdout).not.toContain("missing facets:");
-    expect(scanHuman.stdout).not.toContain("memory dir:");
+
+    const validate = await runCli(["validate", "--format", "json"], dir);
+    expect(validate.code).toBe(0);
+    expect(JSON.parse(validate.stdout).errors).toBe(0);
   });
 
   it("rejects removed init intent flag", async () => {
@@ -1468,290 +558,668 @@ checks:
     );
   });
 
-  it("initializes a blank product scaffold with reference inventory wiring", async () => {
-    const init = await runCli(
-      ["init", "--reference", "packages/ghost-ui/.ghost", "--format", "json"],
-      dir,
-    );
-    const scan = await runCli(["scan", "--format", "json"], dir);
-    const signals = await runCli(["signals"], dir);
-    await mkdir(join(dir, "packages", "ghost-ui", ".ghost"), {
-      recursive: true,
-    });
-    await mkdir(join(dir, "packages", "ghost-ui", "public", "r"), {
-      recursive: true,
-    });
-    await writeFile(
-      join(dir, "packages", "ghost-ui", ".ghost", "manifest.yml"),
-      "schema: ghost.fingerprint-package/v1\nid: ghost-ui\n",
-    );
-    await writeFile(
-      join(dir, "packages", "ghost-ui", "public", "r", "registry.json"),
-      "{}\n",
-    );
-    const verify = await runCli(["verify", ".ghost", "--root", "."], dir);
-
-    expect(init.code).toBe(0);
-    const initOutput = JSON.parse(init.stdout);
-    expect(initOutput.cache).toBeUndefined();
-
-    const fingerprint = parseYaml(
-      await readFile(join(dir, ".ghost", "inventory.yml"), "utf-8"),
-    ) as Record<string, unknown>;
-    expect(fingerprint).not.toHaveProperty("implementation_vocabulary");
-    expect(fingerprint).not.toHaveProperty("patterns");
-    expect(fingerprint).toMatchObject({
-      building_blocks: {
-        libraries: ["ghost-ui"],
-      },
-      sources: [
-        {
-          id: "ghost-ui",
-          kind: "registry",
-          ref: "registry:packages/ghost-ui/public/r/registry.json",
-        },
-      ],
-    });
+  it("rejects the removed --reference init flag", async () => {
     await expect(
-      readFile(join(dir, ".ghost", "config.yml"), "utf-8"),
-    ).rejects.toThrow();
-
-    const status = JSON.parse(scan.stdout);
-    expect(status.config).toBeUndefined();
-    expect(status.contribution.state).toBe("contributing");
-    expect(status.contribution.contributing_facets).toEqual(["inventory"]);
-    expect(status.contribution.absent_facets).toEqual([]);
-    expect(status.contribution.empty_facets).toEqual([
-      "intent",
-      "composition",
-      "validate",
-    ]);
-
-    const signalsOutput = JSON.parse(signals.stdout);
-    expect(signalsOutput.config).toBeUndefined();
-    expect(verify.code).toBe(0);
+      runCli(["init", "--reference", "packages/vessel/.ghost"], dir),
+    ).rejects.toThrow("Unknown option `--reference`");
   });
 
-  it("runs signals, lint, and verify from the unified cli", async () => {
+  it("init --force gathers cleanly on the scaffolded node package", async () => {
+    const init = await runCli(["init", "--format", "json"], dir);
+    expect(init.code).toBe(0);
+    const lint = await runCli(["validate"], dir);
+    expect(lint.code).toBe(0);
+
+    // The seed node is the package-root index.md — id `index`, listed like any other.
+    const gather = await runCli(["gather", "--format", "json"], dir);
+    expect(gather.code).toBe(0);
+    const slice = JSON.parse(gather.stdout);
+    expect(slice.nodes.some((n: { id: string }) => n.id === "index")).toBe(
+      true,
+    );
+  });
+
+  it("gather surfaces glossary kind purposes as a menu legend", async () => {
+    await runCli(["init"], dir);
+
+    // JSON carries the glossary's declared kinds with their prose purposes.
+    const gather = await runCli(["gather", "--format", "json"], dir);
+    expect(gather.code).toBe(0);
+    const menu = JSON.parse(gather.stdout);
+    const principle = menu.kinds.find(
+      (k: { name: string }) => k.name === "principle",
+    );
+    expect(principle.purpose).toContain("Durable stance");
+
+    // Markdown renders the same legend above the node list.
+    const markdown = await runCli(["gather"], dir);
+    expect(markdown.stdout).toContain("Kinds:");
+    expect(markdown.stdout).toContain("- **principle** — Durable stance");
+
+    // A missing glossary degrades to no legend, not an error.
+    await rm(join(dir, ".ghost", "glossary.md"));
+    const bare = await runCli(["gather", "--format", "json"], dir);
+    expect(bare.code).toBe(0);
+    expect(JSON.parse(bare.stdout).kinds).toBeUndefined();
+  });
+
+  it("runs validate from the unified cli", async () => {
     await writeCheckPackage(dir);
-    const signals = await runCli(["signals"], dir);
-    const lint = await runCli(["lint"], dir);
-    const verify = await runCli(["verify", ".ghost", "--root", "."], dir);
+    const validate = await runCli(["validate"], dir);
 
-    expect(signals.code).toBe(0);
-    expect(await realpath(JSON.parse(signals.stdout).root)).toBe(
-      await realpath(dir),
-    );
-    expect(lint.code).toBe(0);
-    expect(lint.stdout).toContain("0 error");
-    expect(verify.code).toBe(0);
-    expect(verify.stdout).toContain("0 error");
+    expect(validate.code).toBe(0);
+    expect(validate.stdout).toContain("0 error");
   });
 
-  it("lints, verifies, and scans the Ghost UI reference bundle", async () => {
-    const lint = await runCli(["lint", "packages/ghost-ui/.ghost"], REPO_ROOT);
-    const verify = await runCli(
-      ["verify", "packages/ghost-ui/.ghost", "--root", "packages/ghost-ui"],
-      REPO_ROOT,
-    );
-    const scan = await runCli(
-      ["scan", "packages/ghost-ui/.ghost", "--format", "json"],
-      REPO_ROOT,
-    );
-
-    expect(lint.code).toBe(0);
-    expect(verify.code).toBe(0);
-    expect(scan.code).toBe(0);
-    const status = JSON.parse(scan.stdout);
-    expect(status.fingerprint.state).toBe("present");
-    expect(status.validate.state).toBe("missing");
-    expect(status.proposals).toBeUndefined();
-    expect(status.cache).toBeUndefined();
-    expect(status.readiness).toBeUndefined();
-    expect(status.checks).toBeUndefined();
-    expect(status.contribution.state).toBe("contributing");
-    expect(status.contribution.contributing_facets).toEqual([
-      "intent",
-      "inventory",
-    ]);
-    expect(status.contribution.empty_facets).toEqual([]);
-    expect(status.contribution.absent_facets).toEqual([
-      "composition",
-      "validate",
-    ]);
-    expect(status.contribution.reasons[0]).toContain(
-      "Absent facets may be inherited",
-    );
-  });
-
-  it("runs survey summary, catalog, and patterns from the unified cli", async () => {
-    await writeComparableBundle(join(dir, ".ghost"), "sectioned-form");
-
-    const summary = await runCli(
-      ["survey", "summarize", ".ghost/survey.json"],
-      dir,
-    );
-    const catalog = await runCli(
-      ["survey", "catalog", ".ghost/survey.json", "--kind", "spacing"],
-      dir,
-    );
-    const patterns = await runCli(
-      ["survey", "patterns", ".ghost/survey.json", "--format", "json"],
-      dir,
-    );
-
-    expect(summary.code).toBe(0);
-    expect(summary.stdout).toContain("Survey Summary");
-    expect(catalog.code).toBe(0);
-    expect(catalog.stdout).toContain("spacing");
-    expect(patterns.code).toBe(0);
-    expect(JSON.parse(patterns.stdout).schema).toBe("ghost.patterns/v1");
-  });
-
-  it("keeps derived patterns implementation-aware when no UI surfaces exist", async () => {
-    await mkdir(join(dir, ".ghost"), { recursive: true });
+  it("gather excludes wild nodes by default and includes marked wild nodes with --wild", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
     await writeFile(
-      join(dir, ".ghost", "survey.json"),
-      JSON.stringify({
-        schema: "ghost.survey/v1",
-        sources: [
-          { id: "library", target: ".", scanned_at: "2026-05-19T00:00:00Z" },
-        ],
-        values: [],
-        tokens: [],
-        components: [
-          {
-            id: "component_button",
-            source: { target: ".", scanned_at: "2026-05-19T00:00:00Z" },
-            name: "Button",
-            discovered_via: "registry.json",
-          },
-        ],
-        ui_surfaces: [],
+      join(dir, ".ghost", "glossary.md"),
+      `---
+kinds:
+  - name: principle
+  - name: provocation
+    posture: wild
+---
+
+# principle
+
+Durable stance.
+
+# provocation
+
+a deliberate provocation past the fingerprint — surfaced only on request
+`,
+    );
+    await writeFile(
+      join(dir, ".ghost", "provocation.noise.md"),
+      "---\ndescription: Break the usual rhythm.\n---\n\nInterrupt the grid.\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "principle.trust.md"),
+      "---\ndescription: Trust.\n---\n\nReduce felt risk.\n",
+    );
+
+    const defaultJson = await runCli(
+      ["gather", "hero", "--format", "json"],
+      dir,
+    );
+    expect(defaultJson.code).toBe(0);
+    const defaultPayload = JSON.parse(defaultJson.stdout);
+    expect(
+      defaultPayload.nodes.map((node: { id: string }) => node.id),
+    ).not.toContain("provocation.noise");
+    expect(defaultPayload.wildAvailable).toBe(1);
+
+    const defaultMarkdown = await runCli(["gather", "hero"], dir);
+    expect(defaultMarkdown.stdout).not.toContain("`provocation.noise`");
+    expect(defaultMarkdown.stdout).toContain(
+      "1 wild node available via `--wild`",
+    );
+
+    const wildJson = await runCli(
+      ["gather", "hero", "--wild", "--format", "json"],
+      dir,
+    );
+    expect(wildJson.code).toBe(0);
+    const wildPayload = JSON.parse(wildJson.stdout);
+    const wildNode = wildPayload.nodes.find(
+      (node: { id: string }) => node.id === "provocation.noise",
+    );
+    expect(wildNode).toMatchObject({
+      kind: "provocation",
+      wild: true,
+    });
+    expect(wildPayload.wildAvailable).toBeUndefined();
+
+    const wildMarkdown = await runCli(["gather", "hero", "--wild"], dir);
+    expect(wildMarkdown.stdout).toContain(
+      "`provocation.noise` _(provocation)_ _(wild)",
+    );
+    expect(wildMarkdown.stdout).toContain(
+      "Wild nodes are marked `(wild)`: they push past the fingerprint",
+    );
+
+    const events = (await readFile(join(dir, ".ghost", ".events"), "utf-8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events[0]).toMatchObject({
+      event: "gather",
+      wild: false,
+      wildIds: [],
+    });
+    expect(events[2]).toMatchObject({
+      event: "gather",
+      wild: true,
+      wildIds: ["provocation.noise"],
+    });
+  });
+
+  it("pull works for wild nodes and pulse reports wild usage", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await writeFile(
+      join(dir, ".ghost", "glossary.md"),
+      `---
+kinds:
+  - name: principle
+  - name: provocation
+    posture: wild
+---
+
+# principle
+
+Durable stance.
+
+# provocation
+
+a deliberate provocation past the fingerprint — surfaced only on request
+`,
+    );
+    await writeFile(
+      join(dir, ".ghost", "provocation.noise.md"),
+      "---\ndescription: Break the usual rhythm.\n---\n\nInterrupt the grid.\n",
+    );
+
+    await runCli(["gather", "hero", "--wild"], dir);
+    const pull = await runCli(["pull", "provocation.noise"], dir);
+    expect(pull.code).toBe(0);
+    expect(pull.stdout).toContain("Interrupt the grid.");
+    expect(pull.stdout).toContain("_(wild)_");
+
+    const events = (await readFile(join(dir, ".ghost", ".events"), "utf-8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.at(-1)).toMatchObject({
+      event: "pull",
+      ids: ["provocation.noise"],
+      wildIds: ["provocation.noise"],
+    });
+
+    const pulse = await runCli(["pulse", "--format", "json"], dir);
+    expect(pulse.code).toBe(0);
+    expect(JSON.parse(pulse.stdout).wild).toEqual({ exposures: 1, pulls: 1 });
+
+    const md = await runCli(["pulse"], dir);
+    expect(md.stdout).toContain("## Wild usage");
+    expect(md.stdout).toContain("- Wild exposures: 1");
+    expect(md.stdout).toContain("- Wild pulls: 1");
+  });
+
+  it("announces the events tape once, on first write, on stderr only", async () => {
+    await runCli(["init"], dir);
+
+    // First event-writing command creates the tape and prints the notice.
+    const first = await runCli(["gather", "checkout"], dir);
+    expect(first.code).toBe(0);
+    expect(first.stderr).toContain(".ghost/.events");
+    expect(first.stderr).toContain("gitignored");
+    expect(first.stderr).toContain("never leaves your machine");
+    // Stdout stays clean for piping.
+    expect(first.stdout).not.toContain("never leaves your machine");
+
+    // Every subsequent write is silent.
+    const second = await runCli(["gather", "checkout"], dir);
+    expect(second.code).toBe(0);
+    expect(second.stderr).not.toContain(".ghost/.events");
+
+    const pull = await runCli(["pull", "index"], dir);
+    expect(pull.code).toBe(0);
+    expect(pull.stderr).not.toContain(".ghost/.events");
+  });
+
+  it("gather reports concrete coverage and pull uses steering order with given-order escape hatch", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await writeFile(
+      join(dir, ".ghost", "glossary.md"),
+      "---\nkinds:\n  - name: anti-goal\n    posture: guard\n  - name: asset\n  - name: principle\n---\n\n# anti-goal\n\nReview-critical replacement.\n\n# asset\n\nConcrete material.\n\n# principle\n\nRule.\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "asset.tokens.md"),
+      "---\ndescription: Tokens.\nmaterials:\n  - missing.css\n---\n\nUse exact tokens.\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "principle.rule.md"),
+      "---\ndescription: Rule.\n---\n\nPlain rule.\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "anti-goal.generic.md"),
+      "---\ndescription: Generic replacement.\n---\n\nNot vague; instead exact.\n",
+    );
+
+    const gather = await runCli(["gather", "--format", "json"], dir);
+    expect(gather.code).toBe(0);
+    expect(JSON.parse(gather.stdout).coverage).toEqual({
+      nodes: 4,
+      concrete: 1,
+      guards: 1,
+    });
+    const markdown = await runCli(["gather"], dir);
+    expect(markdown.stdout).toContain(
+      "4 nodes · 1 carry concrete material · 1 guards",
+    );
+
+    const steering = await runCli(
+      ["pull", "anti-goal.generic", "principle.rule", "asset.tokens"],
+      dir,
+    );
+    expect(steering.code).toBe(0);
+    expect(steering.stdout.indexOf("`asset.tokens`")).toBeLessThan(
+      steering.stdout.indexOf("`principle.rule`"),
+    );
+    expect(steering.stdout.indexOf("`principle.rule`")).toBeLessThan(
+      steering.stdout.indexOf("`anti-goal.generic`"),
+    );
+
+    const given = await runCli(
+      [
+        "pull",
+        "anti-goal.generic",
+        "principle.rule",
+        "asset.tokens",
+        "--order",
+        "given",
+      ],
+      dir,
+    );
+    expect(given.stdout.indexOf("`anti-goal.generic`")).toBeLessThan(
+      given.stdout.indexOf("`principle.rule`"),
+    );
+  });
+
+  it("pull extracts Skeletons last and validate warns on malformed Skeleton sections", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await writeFile(
+      join(dir, ".ghost", "pattern.card.md"),
+      "---\ndescription: Card pattern.\n---\n\nPattern prose.\n\n## Skeleton\n\n```tsx\n<section>{children}</section>\n```\n\nAfter skeleton should be stripped.\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "pattern.bad.md"),
+      "---\ndescription: Bad skeleton.\n---\n\n## Skeleton\n\nNo fence here.\n",
+    );
+
+    const pull = await runCli(["pull", "pattern.card"], dir);
+    expect(pull.code).toBe(0);
+    expect(pull.stdout).toContain("Pattern prose.");
+    expect(pull.stdout).not.toContain("After skeleton should be stripped.");
+    expect(pull.stdout).toContain(
+      "# Skeletons — begin the artifact from this structure",
+    );
+    expect(pull.stdout.indexOf("# `pattern.card`")).toBeLessThan(
+      pull.stdout.indexOf("# Skeletons"),
+    );
+    expect(pull.stdout).toContain("<section>{children}</section>");
+
+    const validate = await runCli(["validate"], dir);
+    expect(validate.code).toBe(0);
+    expect(validate.stdout).toContain("skeleton-fence-count");
+  });
+
+  it("pull emits binary materials as inspect-pointers in markdown and JSON", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await mkdir(join(dir, "brand"), { recursive: true });
+    await writeFile(join(dir, "brand", "mark.png"), Buffer.from([0, 1, 2]));
+    await writeFile(
+      join(dir, ".ghost", "asset.logo.md"),
+      "---\ndescription: Logo.\nmaterials:\n  - brand/mark.png\n---\n\nInspect the blessed mark.\n",
+    );
+
+    const md = await runCli(["pull", "asset.logo"], dir);
+    expect(md.stdout).toContain(
+      "- inspect: brand/mark.png — view this image before generating",
+    );
+
+    const json = await runCli(["pull", "asset.logo", "--format", "json"], dir);
+    expect(JSON.parse(json.stdout).nodes[0].materials[0]).toMatchObject({
+      locator: "brand/mark.png",
+      tier: "referenced",
+      omitted: true,
+      reason: "binary inspect-pointer",
+      inspect: "brand/mark.png",
+    });
+  });
+
+  it("gather and pull append structured local events", async () => {
+    await runCli(["init"], dir);
+    await writeFile(
+      join(dir, ".ghost", "principle.trust.md"),
+      "---\ndescription: Trust at the payment moment.\n---\n\nNear payment, reduce felt risk.\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "voice.md"),
+      "---\ndescription: The brand voice.\n---\n\nPlain words. No hype.\n",
+    );
+
+    const gather = await runCli(
+      ["gather", "checkout", "confirmation", "--format", "json"],
+      dir,
+    );
+    expect(gather.code).toBe(0);
+    const menuPayload = JSON.parse(gather.stdout);
+    expect(menuPayload.ask).toBe("checkout confirmation");
+    expect(
+      menuPayload.nodes.some((n: { id: string }) => n.id === "voice"),
+    ).toBe(true);
+
+    const gatherMarkdown = await runCli(["gather", "checkout", "hero"], dir);
+    expect(gatherMarkdown.stdout).toContain(
+      "# Ghost Nodes — for: checkout hero",
+    );
+
+    const pull = await runCli(["pull", "principle.trust", "voice"], dir);
+    expect(pull.code).toBe(0);
+    expect(pull.stdout).toContain("Near payment, reduce felt risk.");
+    expect(pull.stdout).toContain("Plain words. No hype.");
+
+    // JSON format carries id, kind, description, and body.
+    const json = await runCli(
+      ["pull", "principle.trust", "--format", "json"],
+      dir,
+    );
+    expect(json.code).toBe(0);
+    const payload = JSON.parse(json.stdout);
+    expect(payload.kind).toBe("pull");
+    expect(payload.nodes[0]).toMatchObject({
+      id: "principle.trust",
+      kind: "principle",
+      description: "Trust at the payment moment.",
+    });
+    expect(payload.nodes[0].body).toContain("reduce felt risk");
+
+    // --no-events skips the events tape.
+    await runCli(["pull", "voice", "--no-events"], dir);
+    const events = (await readFile(join(dir, ".ghost", ".events"), "utf-8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.map((event: { event: string }) => event.event)).toEqual([
+      "gather",
+      "gather",
+      "pull",
+      "pull",
+    ]);
+    expect(events[0]).toMatchObject({
+      event: "gather",
+      ask: "checkout confirmation",
+    });
+    expect(events[0].menu).toContain("principle.trust");
+    expect(events[2]).toMatchObject({
+      event: "pull",
+      ids: ["principle.trust", "voice"],
+    });
+
+    // The tape is a dotfile: never a node, and gitignored by the scaffold.
+    const menu = JSON.parse(
+      (await runCli(["gather", "--format", "json"], dir)).stdout,
+    );
+    expect(
+      menu.nodes.some((n: { id: string }) => n.id.includes("events")),
+    ).toBe(false);
+    await expect(
+      readFile(join(dir, ".ghost", ".gitignore"), "utf-8"),
+    ).resolves.toContain(".events");
+    const validate = await runCli(["validate"], dir);
+    expect(validate.code).toBe(0);
+  });
+
+  it("pull inlines material files and emits inspect-pointers for binary materials, oversize files, and URL locators", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await mkdir(join(dir, ".ghost", "materials"), { recursive: true });
+    await mkdir(join(dir, "brand"), { recursive: true });
+    await writeFile(
+      join(dir, ".ghost", "materials", "tokens.css"),
+      ":root { --brand: #111; }\n",
+    );
+    await writeFile(join(dir, "brand", "voice.txt"), "Use plain words.\n");
+    await writeFile(join(dir, "brand", "mark.bin"), Buffer.from([0, 1, 2]));
+    await writeFile(join(dir, "brand", "large.txt"), "x".repeat(8 * 1024 + 1));
+    await writeFile(
+      join(dir, ".ghost", "asset.materials.md"),
+      "---\ndescription: Materials.\nmaterials:\n  - materials/tokens.css\n  - brand/voice.txt\n  - brand/mark.bin\n  - brand/large.txt\n  - https://example.com/brand-kit\n---\n\nRead these materials.\n",
+    );
+
+    const md = await runCli(["pull", "asset.materials"], dir);
+
+    expect(md.code).toBe(0);
+    expect(md.stdout).toContain("Read these materials.");
+    expect(md.stdout).toContain("```.ghost/materials/tokens.css");
+    expect(md.stdout).toContain(":root { --brand: #111; }");
+    expect(md.stdout).toContain("```brand/voice.txt");
+    expect(md.stdout).toContain("Use plain words.");
+    expect(md.stdout).toContain(
+      "- inspect: brand/mark.bin — view this image before generating",
+    );
+    expect(md.stdout).toContain(
+      "- brand/large.txt — exceeds 8 KB inline limit",
+    );
+    expect(md.stdout).toContain(
+      "- https://example.com/brand-kit — HTTPS URL; fetch it only if the task requires it",
+    );
+
+    const events = (await readFile(join(dir, ".ghost", ".events"), "utf-8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.at(-1)).toMatchObject({
+      event: "pull",
+      ids: ["asset.materials"],
+      inlinedMaterials: 2,
+      omittedMaterials: 3,
+    });
+  });
+
+  it("pull supports locator-only output with --no-materials", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await mkdir(join(dir, ".ghost", "materials"), { recursive: true });
+    await writeFile(
+      join(dir, ".ghost", "materials", "tokens.css"),
+      ":root{}\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "asset.tokens.md"),
+      "---\ndescription: Tokens.\nmaterials:\n  - materials/tokens.css\n---\n\nToken prose.\n",
+    );
+
+    const md = await runCli(["pull", "asset.tokens", "--no-materials"], dir);
+
+    expect(md.code).toBe(0);
+    expect(md.stdout).toContain("Materials:");
+    expect(md.stdout).toContain("- materials/tokens.css");
+    expect(md.stdout).not.toContain("```.ghost/materials/tokens.css");
+
+    const json = await runCli(
+      ["pull", "asset.tokens", "--no-materials", "--format", "json"],
+      dir,
+    );
+    expect(json.code).toBe(0);
+    expect(JSON.parse(json.stdout).nodes[0].materials).toEqual([
+      "materials/tokens.css",
+    ]);
+  });
+
+  it("pull emits transported material objects in JSON", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await mkdir(join(dir, ".ghost", "materials"), { recursive: true });
+    await mkdir(join(dir, "brand"), { recursive: true });
+    await writeFile(
+      join(dir, ".ghost", "materials", "tokens.css"),
+      ":root{}\n",
+    );
+    await writeFile(join(dir, "brand", "voice.txt"), "Plain.\n");
+    await writeFile(
+      join(dir, ".ghost", "asset.tokens.md"),
+      "---\ndescription: Tokens.\nmaterials:\n  - materials/tokens.css\n  - brand/voice.txt\n  - https://example.com/tokens\n---\n\nToken prose.\n",
+    );
+
+    const json = await runCli(
+      ["pull", "asset.tokens", "--format", "json"],
+      dir,
+    );
+
+    expect(json.code).toBe(0);
+    const node = JSON.parse(json.stdout).nodes[0];
+    expect(node.materials).toEqual([
+      {
+        locator: "materials/tokens.css",
+        tier: "bundled",
+        inlined: ":root{}\n",
+      },
+      {
+        locator: "brand/voice.txt",
+        tier: "referenced",
+        inlined: "Plain.\n",
+      },
+      {
+        locator: "https://example.com/tokens",
+        tier: "url",
+        omitted: true,
+        reason: "HTTPS URL; fetch it only if the task requires it",
+      },
+    ]);
+  });
+
+  it("pull expands globs with a cap and notes elision beyond it", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await mkdir(join(dir, "brand", "samples"), { recursive: true });
+    for (let i = 0; i < 13; i++) {
+      await writeFile(
+        join(dir, "brand", "samples", `${String(i).padStart(2, "0")}.txt`),
+        `sample ${i}\n`,
+      );
+    }
+    await writeFile(
+      join(dir, ".ghost", "asset.samples.md"),
+      "---\ndescription: Samples.\nmaterials:\n  - brand/samples/*.txt\n---\n\nSample prose.\n",
+    );
+
+    const json = await runCli(
+      ["pull", "asset.samples", "--format", "json"],
+      dir,
+    );
+
+    expect(json.code).toBe(0);
+    const materials = JSON.parse(json.stdout).nodes[0].materials;
+    expect(
+      materials.filter((m: { inlined?: string }) => m.inlined).length,
+    ).toBe(12);
+    expect(materials).toContainEqual(
+      expect.objectContaining({
+        locator: "brand/samples/*.txt",
+        tier: "referenced",
+        omitted: true,
+        reason: "glob matched more than 12 files; omitted the rest",
       }),
     );
-
-    const result = await runCli(
-      ["survey", "patterns", ".ghost/survey.json", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const patterns = JSON.parse(result.stdout);
-    expect(patterns.composition_patterns).toHaveLength(0);
-    expect(patterns.advisory.review_expectations[0]).toContain(
-      "No UI surface evidence",
-    );
   });
 
-  it("runs survey fix-ids from the unified cli", async () => {
-    await writeComparableBundle(join(dir, ".ghost"), "sectioned-form");
-
-    const result = await runCli(
-      [
-        "survey",
-        "fix-ids",
-        ".ghost/survey.json",
-        "-o",
-        ".ghost/survey.fixed.json",
-      ],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const fixed = JSON.parse(
-      await readFile(join(dir, ".ghost", "survey.fixed.json"), "utf-8"),
-    );
-    expect(fixed.schema).toBe("ghost.survey/v1");
-    expect(fixed.values[0].id).toBeTruthy();
-  });
-
-  it("emits review commands from the unified cli", async () => {
-    await writeCheckPackage(dir);
+  it("pull partially succeeds with closest-id hints for unknown nodes", async () => {
+    await runCli(["init"], dir);
     await writeFile(
-      join(dir, ".ghost", "fingerprint.md"),
-      fingerprintWithId("local"),
+      join(dir, ".ghost", "principle.trust.md"),
+      "---\ndescription: Trust.\n---\n\nBody.\n",
     );
 
-    const reviewCommand = await runCli(["emit", "review-command"], dir);
-
-    expect(reviewCommand.code).toBe(0);
-    expect(reviewCommand.stdout).toContain("design-review.md");
-    const emittedReviewCommand = await readFile(
-      join(dir, ".claude", "commands", "design-review.md"),
-      "utf-8",
-    );
-    expect(emittedReviewCommand).toContain(
-      ".ghost/intent.yml`, `.ghost/inventory.yml`, and `.ghost/composition.yml",
-    );
-    expect(emittedReviewCommand).toContain("Exemplars");
-    expect(emittedReviewCommand).toContain("lending-tokenized-screen");
-    expect(emittedReviewCommand).toContain("provisional and non-Ghost-backed");
-    expect(emittedReviewCommand).not.toContain("Proposal Threshold");
-    expect(emittedReviewCommand).not.toContain("recommend-proposal");
-    expect(emittedReviewCommand).toContain("experience-gap");
-    expect(emittedReviewCommand).toContain("no-hardcoded-ui-color");
-    expect(emittedReviewCommand).not.toContain(
-      "deprecated legacy direct-markdown",
-    );
-  });
-
-  it("rejects removed context-bundle emit kind", async () => {
-    await writeCheckPackage(dir);
-
-    const contextBundle = await runCli(["emit", "context-bundle"], dir);
-
-    expect(contextBundle.code).toBe(2);
-    expect(contextBundle.stderr).toContain(
-      "unknown emit kind 'context-bundle'",
-    );
-  });
-
-  it("gathers a Relay brief from the resolved fingerprint stack", async () => {
-    await writeCheckPackage(dir);
-
-    const result = await runCli(
-      ["relay", "gather", "Code/Features/Lending/LendingUI"],
+    const partial = await runCli(
+      ["pull", "principle.trust", "principle.trst"],
       dir,
     );
+    expect(partial.code).toBe(0);
+    expect(partial.stdout).toContain("Body.");
+    expect(partial.stderr).toContain("unknown node `principle.trst`");
+    expect(partial.stderr).toContain("principle.trust");
 
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("# Ghost Relay Brief");
-    expect(result.stdout).toContain("## Stack");
-    expect(result.stdout).toContain("## Match");
-    expect(result.stdout).toContain("Status: path matched");
-    expect(result.stdout).toContain("Matched scopes: `lending`");
-    expect(result.stdout).toContain("## Context Hits");
-    expect(result.stdout).toContain("## Suggested Reads");
-    expect(result.stdout).toContain("## Omissions");
-    expect(result.stdout).toContain("## Gaps");
-    expect(result.stdout).toContain("intent.principle:tokenized-ui-color");
-    expect(result.stdout).toContain("composition.pattern:tokenized-ui-color");
-    expect(result.stdout).toContain(
-      "inventory.exemplar:lending-tokenized-screen",
-    );
-    expect(result.stdout).toContain(
-      "why: path=Code/Features/Lending/LendingUI",
-    );
-    expect(result.stdout).toContain("no-hardcoded-ui-color");
-    expect(result.stdout).not.toContain("candidate-density-check");
-  });
-
-  it("shows Relay config help without dialect terminology", async () => {
-    const result = await runCli(["relay", "--help"], dir, {
+    const onlyMiss = await runCli(["pull", "principle.trst"], dir, {
       allowNoExit: true,
     });
+    expect(onlyMiss.code).toBe(2);
+    expect(onlyMiss.stderr).toContain("unknown node `principle.trst`");
 
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("--config <file>");
-    expect(result.stdout).toContain("Load an explicit Ghost Relay config");
-    expect(result.stdout).toContain("--request <file>");
-    expect(result.stdout).toContain("--request-stdin");
-    expect(result.stdout).not.toContain("--dialect");
-    expect(result.stdout).not.toContain("dialect");
+    const events = (await readFile(join(dir, ".ghost", ".events"), "utf-8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events[0]).toMatchObject({
+      event: "pull",
+      ids: ["principle.trust"],
+      missed: [{ requested: "principle.trst", suggested: ["principle.trust"] }],
+    });
+    expect(events[1]).toMatchObject({
+      event: "pull",
+      ids: [],
+      missed: [{ requested: "principle.trst", suggested: ["principle.trust"] }],
+    });
   });
 
-  it("gathers Relay context as json from an exact package", async () => {
+  it("pulse reports local gather/pull metrics", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await writeFile(
+      join(dir, ".ghost", "principle.trust.md"),
+      "---\ndescription: Trust.\n---\n\nBody.\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "voice.md"),
+      "---\ndescription: Voice.\n---\n\nPlain.\n",
+    );
+
+    await runCli(["gather", "checkout"], dir);
+    await runCli(["pull", "principle.trust", "principle.trst"], dir);
+    await runCli(["gather", "settings"], dir);
+
+    const pulse = await runCli(["pulse", "--format", "json"], dir);
+    expect(pulse.code).toBe(0);
+    const report = JSON.parse(pulse.stdout);
+    expect(report).toMatchObject({
+      kind: "pulse",
+      gathers: 2,
+      pulls: 1,
+      abandonedGathers: 1,
+      pullsPerGather: 0.5,
+      wild: { exposures: 0, pulls: 0 },
+    });
+    const trust = report.nodes.find(
+      (node: { id: string }) => node.id === "principle.trust",
+    );
+    expect(trust).toMatchObject({
+      exposures: 2,
+      pulls: 1,
+      hitRate: 0.5,
+    });
+    expect(report.coldNodes).toContain("voice");
+    expect(report.misses[0]).toMatchObject({
+      requested: "principle.trst",
+      count: 1,
+      suggested: ["principle.trust"],
+    });
+    const principleKind = report.kinds.find(
+      (kind: { kind: string }) => kind.kind === "principle",
+    );
+    expect(principleKind).toMatchObject({
+      exposures: 2,
+      pulls: 1,
+      hitRate: 0.5,
+      coldNodes: [],
+    });
+    const noKind = report.kinds.find(
+      (kind: { kind: string }) => kind.kind === "(no kind)",
+    );
+    expect(noKind).toMatchObject({
+      exposures: 4,
+      pulls: 0,
+      hitRate: 0,
+      coldNodes: ["index", "voice"],
+    });
+
+    const md = await runCli(["pulse"], dir);
+    expect(md.stdout).toContain("# Ghost Pulse");
+    expect(md.stdout).toContain("## Kind hit rates");
+    expect(md.stdout).toContain("## Wild usage");
+    expect(md.stdout).toContain("- Abandoned gathers: 1");
+  });
+
+  // Phase 3: asserts path/scope/surface_type selection reasons (dormant Job 2,
+  // rebuilt as `gather` in Phase 5/7). Skipped until then.
+  it.skip("gathers Relay context as json from an exact package", async () => {
     await writeCheckPackage(dir);
 
     const result = await runCli(
@@ -1851,351 +1319,6 @@ checks:
     expect(json.brief).toContain("## Context Hits");
   });
 
-  it("gathers Relay context with explicit mode", async () => {
-    await writeCheckPackage(dir);
-
-    const result = await runCli(
-      [
-        "relay",
-        "gather",
-        "Code/Features/Lending/LendingUI",
-        "--format",
-        "json",
-        "--mode",
-        "review",
-      ],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const json = JSON.parse(result.stdout);
-    expect(json.context.target).toMatchObject({
-      mode: "review",
-    });
-  });
-
-  it("gathers Relay context from a structured request file", async () => {
-    await writeCheckPackage(dir);
-    await writeRelayRequestStackScenario(dir);
-    await writeFile(
-      join(dir, "request.yml"),
-      `schema: ghost.relay-request/v1
-task: generate-interface
-prompt: Generate a subscriber renewal email surface.
-selectors:
-  customer: subscriber
-  system: portal
-  moment: renewal-reminder
-  medium: email
-  capability: billing
-`,
-    );
-
-    const result = await runCli(
-      ["relay", "gather", "--request", "request.yml", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const json = JSON.parse(result.stdout);
-    expect(json.schema).toBe("ghost.relay.gather/v2");
-    expect(json.source.kind).toBe("request-stack");
-    expect(json.source.stack).toMatchObject({
-      id: "portal.renewal-reminder.email",
-      path: "stacks/portal.renewal-reminder.email.yml",
-    });
-    expect(json.context.schema).toBe("ghost.relay-context/v1");
-    expect(json.context.target.request).toMatchObject({
-      schema: "ghost.relay-request/v1",
-      task: "generate-interface",
-      selectors: {
-        customer: "subscriber",
-        system: "portal",
-        moment: "renewal-reminder",
-        medium: "email",
-        capability: "billing",
-      },
-    });
-    expect(json.context.sections.questions).toEqual([
-      expect.objectContaining({
-        id: "email-sensitive-detail",
-        source: "media/email/questions.yml",
-      }),
-    ]);
-    expect(json).toHaveProperty("selected_context");
-    expect(json).toHaveProperty("source");
-    expect(json).toHaveProperty("targetPaths");
-    expect(json).toHaveProperty("stackDirs");
-    expect(json).toHaveProperty("brief");
-    expect(json).not.toHaveProperty("context_packet");
-  });
-
-  it("gathers Relay context from a structured request on stdin", async () => {
-    await writeCheckPackage(dir);
-    await writeRelayRequestStackScenario(dir);
-
-    const result = await runCli(
-      ["relay", "gather", "--request-stdin", "--format", "json"],
-      dir,
-      {
-        stdin: `schema: ghost.relay-request/v1
-task: answer
-selectors:
-  medium: email
-`,
-      },
-    );
-
-    expect(result.code).toBe(0);
-    const json = JSON.parse(result.stdout);
-    expect(json.source.kind).toBe("request-stack");
-    expect(json.context.target.request).toMatchObject({
-      task: "answer",
-      selectors: {
-        medium: "email",
-      },
-    });
-  });
-
-  it("gathers request-only Relay context from an explicit config without .ghost", async () => {
-    await writeRelayRequestOnlyScenario(dir);
-
-    const result = await runCli(
-      [
-        "relay",
-        "gather",
-        "--request-stdin",
-        "--config",
-        ".agents/ghost/relay.yml",
-        "--format",
-        "json",
-      ],
-      dir,
-      {
-        stdin: `schema: ghost.relay-request/v1
-task: answer
-selectors:
-  medium: email
-`,
-      },
-    );
-
-    expect(result.code).toBe(0);
-    const json = JSON.parse(result.stdout);
-    expect(json.source.kind).toBe("request-stack");
-    expect(json.source.base).toEqual({ kind: "none" });
-    expect(json).not.toHaveProperty("ghostDir");
-    expect(json.stackDirs).toEqual([]);
-    expect(json.context.config.base).toEqual({ kind: "none" });
-    expect(json.context.sections.questions).toEqual([
-      expect.objectContaining({
-        id: "email-sensitive-detail",
-        source: "media/email/questions.yml",
-      }),
-    ]);
-    expect(json.context.gaps).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "no-base-fingerprint" }),
-      ]),
-    );
-  });
-
-  it("gathers request-only Relay context from GHOST_RELAY_CONFIG", async () => {
-    await writeRelayRequestOnlyScenario(dir);
-
-    const result = await runCli(
-      ["relay", "gather", "--request-stdin", "--format", "json"],
-      dir,
-      {
-        env: { GHOST_RELAY_CONFIG: ".agents/ghost/relay.yml" },
-        stdin: `schema: ghost.relay-request/v1
-task: answer
-selectors:
-  medium: email
-`,
-      },
-    );
-
-    expect(result.code).toBe(0);
-    const json = JSON.parse(result.stdout);
-    expect(json.source.kind).toBe("request-stack");
-    expect(json.source.base).toEqual({ kind: "none" });
-    expect(json.context.config.path).toContain(".agents/ghost/relay.yml");
-  });
-
-  it("synthesizes a request for target-only request-only Relay context", async () => {
-    await writeRelayRequestOnlyScenario(dir);
-
-    const result = await runCli(
-      [
-        "relay",
-        "gather",
-        "stacks/portal.renewal-reminder.email.yml",
-        "--config",
-        ".agents/ghost/relay.yml",
-        "--format",
-        "json",
-      ],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const json = JSON.parse(result.stdout);
-    expect(json.source.kind).toBe("request-stack");
-    expect(json.context.target.request).toMatchObject({
-      task: "gather",
-      target_paths: ["stacks/portal.renewal-reminder.email.yml"],
-    });
-    expect(json.targetPaths).toEqual([
-      "stacks/portal.renewal-reminder.email.yml",
-    ]);
-  });
-
-  it("returns request-only Relay gaps instead of requiring .ghost", async () => {
-    await writeRelayRequestOnlyScenario(dir);
-
-    const result = await runCli(
-      [
-        "relay",
-        "gather",
-        "--request-stdin",
-        "--config",
-        ".agents/ghost/relay.yml",
-        "--format",
-        "json",
-      ],
-      dir,
-      {
-        stdin: `schema: ghost.relay-request/v1
-task: answer
-selectors:
-  medium: voice
-`,
-      },
-    );
-
-    expect(result.code).toBe(0);
-    const json = JSON.parse(result.stdout);
-    expect(json.source.kind).toBe("request");
-    expect(json.source.reason).toBe("unmatched");
-    expect(json.context.gaps).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "no-base-fingerprint" }),
-        expect.objectContaining({ kind: "request-unmatched" }),
-      ]),
-    );
-  });
-
-  it("rejects canonical unit source sections for request-only Relay config", async () => {
-    await writeRelayRequestOnlyScenario(dir, { invalidUnitSection: true });
-
-    const result = await runCli(
-      [
-        "relay",
-        "gather",
-        "--request-stdin",
-        "--config",
-        ".agents/ghost/relay.yml",
-        "--format",
-        "json",
-      ],
-      dir,
-      {
-        stdin: `schema: ghost.relay-request/v1
-task: answer
-selectors:
-  medium: email
-`,
-      },
-    );
-
-    expect(result.code).toBe(2);
-    expect(result.stderr).toContain(
-      "section must be questions, sources, or an extra section",
-    );
-  });
-
-  it("ignores GHOST_PACKAGE_DIR when gathering Relay context from an exact package", async () => {
-    await writeSplitFingerprintPackage(
-      join(dir, "product-surface"),
-      `schema: ghost.fingerprint/v1
-intent:
-  summary:
-    product: Product Surface
-  situations: []
-  principles: []
-  experience_contracts: []
-inventory:
-  topology: {}
-  exemplars: []
-  building_blocks: {}
-composition:
-  patterns: []
-`,
-    );
-
-    const result = await runCli(
-      ["relay", "gather", "--package", "product-surface", "--format", "json"],
-      dir,
-      { env: { GHOST_PACKAGE_DIR: "elsewhere" } },
-    );
-
-    expect(result.code).toBe(0);
-    const json = JSON.parse(result.stdout);
-    const expectedPackageDir = await realpath(join(dir, "product-surface"));
-    expect(json.source.kind).toBe("package");
-    expect(json.source.packageDir).toBe(expectedPackageDir);
-    expect(json).not.toHaveProperty("ghostDir");
-    expect(json.stackDirs).toEqual([expectedPackageDir]);
-  });
-
-  it("rejects invalid Relay output formats", async () => {
-    await writeCheckPackage(dir);
-
-    const result = await runCli(["relay", "gather", "--format", "yaml"], dir);
-
-    expect(result.code).toBe(2);
-    expect(result.stderr).toContain("--format must be 'markdown' or 'json'");
-  });
-
-  it("warns when fingerprint exemplar paths are unreachable", async () => {
-    await writeCheckPackage(dir);
-
-    const verify = await runCli(
-      ["verify", ".ghost", "--root", ".", "--format", "json"],
-      dir,
-    );
-
-    expect(verify.code).toBe(0);
-    const report = JSON.parse(verify.stdout);
-    expect(report.issues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          rule: "fingerprint-exemplar-unreachable",
-          path: "inventory.yml.exemplars[0].path",
-        }),
-      ]),
-    );
-  });
-
-  it("rejects removed legacy direct markdown emit flags", () => {
-    const cli = buildCli();
-
-    expect(() =>
-      cli.parse([
-        "node",
-        "ghost",
-        "emit",
-        "review-command",
-        "--fingerprint",
-        "legacy.fingerprint.md",
-        "--stdout",
-      ]),
-    ).toThrow("Unknown option `--fingerprint`");
-    expect(() =>
-      cli.parse(["node", "ghost", "emit", "context-bundle", "--no-tokens"]),
-    ).toThrow("Unknown option `--tokens`");
-  });
   it("installs the unified ghost skill bundle", async () => {
     const result = await runCli(
       ["skill", "install", "--dest", "skills/ghost"],
@@ -2206,9 +1329,13 @@ composition:
     for (const path of [
       "SKILL.md",
       "references/capture.md",
-      "references/review.md",
-      "references/remediate.md",
+      "references/blocks.md",
       "references/brief.md",
+      "references/recall.md",
+      "references/wild.md",
+      "references/self-check.md",
+      "references/schema.md",
+      "references/authoring-scenarios.md",
     ]) {
       await expect(
         readFile(join(dir, "skills", "ghost", path), "utf-8"),
@@ -2216,510 +1343,477 @@ composition:
     }
     await expect(
       readFile(join(dir, "skills", "ghost", "SKILL.md"), "utf-8"),
-    ).resolves.toContain("When Fingerprint Facets Are Silent");
+    ).resolves.toContain("When the fingerprint is silent");
     await expect(
       readFile(join(dir, "skills", "ghost", "SKILL.md"), "utf-8"),
     ).resolves.toContain(
-      "Never claim provisional reasoning, local convention, or general UX reasoning",
+      "Never claim provisional or local-convention reasoning",
     );
-    await expect(
-      readFile(
-        join(dir, "skills", "ghost", "references", "review.md"),
-        "utf-8",
-      ),
-    ).resolves.toContain("fingerprint facets are silent");
-    await expect(
-      readFile(join(dir, "skills", "ghost", "references", "brief.md"), "utf-8"),
-    ).resolves.toContain("ghost relay gather <target> --format json");
-    await expect(
-      readFile(join(dir, "skills", "ghost", "references", "brief.md"), "utf-8"),
-    ).resolves.toContain("ghost relay gather --request-stdin --format json");
-    await expect(
-      readFile(join(dir, "skills", "ghost", "references", "brief.md"), "utf-8"),
-    ).resolves.toContain(
-      "Do not scrape\nthat markdown as the primary agent interface",
-    );
-    await expect(
-      readFile(
-        join(dir, "skills", "ghost", "references", "verify.md"),
-        "utf-8",
-      ),
-    ).resolves.toContain("ghost relay gather <target> --format json");
-    await expect(
-      readFile(
-        join(dir, "skills", "ghost", "references", "verify.md"),
-        "utf-8",
-      ),
-    ).resolves.toContain("ghost relay gather --request-stdin --format json");
-    await expect(
-      readFile(
-        join(dir, "skills", "ghost", "references", "propose.md"),
-        "utf-8",
-      ),
-    ).rejects.toThrow();
+    // The review/verify/remediate/critique recipes are not part of the
+    // fingerprint skill bundle.
+    for (const gone of [
+      "review.md",
+      "verify.md",
+      "remediate.md",
+      "critique.md",
+    ]) {
+      await expect(
+        readFile(join(dir, "skills", "ghost", "references", gone), "utf-8"),
+      ).rejects.toThrow();
+    }
   });
 
-  it("check fails when an active deterministic check matches added lines", async () => {
-    await writeCheckPackage(dir);
-    await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch("UIColor(#ffffff)"),
-    );
+  it("gather emits the full flat menu (no anchor, no slice)", async () => {
+    await writeGatherPackage(dir);
 
     const result = await runCli(
-      ["check", "--diff", "change.patch", "--format", "json"],
+      ["gather", "--package", ".ghost", "--format", "json"],
       dir,
     );
 
-    expect(result.code, result.stderr).toBe(1);
-    const report = JSON.parse(result.stdout);
-    expect(report.result).toBe("fail");
-    expect(report.findings[0]).toMatchObject({
-      check_id: "no-hardcoded-ui-color",
-      path: "Code/Features/Lending/View.swift",
-      line: 1,
+    expect(result.code).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.kind).toBe("menu");
+    const ids = payload.nodes.map((node: { id: string }) => node.id);
+    // Every authored node is offered; the agent selects. No cascade, no slice.
+    // The id rule is uniform: path minus .md — index.md is id `index`.
+    expect(ids).toContain("index");
+    expect(ids).toContain("email/marketing/index");
+    expect(ids).toContain("checkout/clarity");
+  });
+
+  it("gather shows material counts on nodes and never serves checks", async () => {
+    await writeGatherPackage(dir);
+    const checksDir = join(dir, ".ghost", "checks");
+    await mkdir(checksDir, { recursive: true });
+    await writeFile(
+      join(dir, ".ghost", "asset.logo.md"),
+      "---\ndescription: Logo.\nmaterials:\n  - brand/logo.svg\n  - https://example.com/logo\n---\n\nLogo prose.\n",
+    );
+    await writeFile(
+      join(checksDir, "secret-check.md"),
+      "---\nname: secret-check\ndescription: Never served.\nseverity: high\nreferences:\n  - asset.logo\n---\n\nGrade it.\n",
+    );
+
+    const md = await runCli(["gather", "--package", ".ghost"], dir);
+    expect(md.code).toBe(0);
+    expect(md.stdout).toContain("`asset.logo`");
+    expect(md.stdout).toContain("materials: 2");
+    expect(md.stdout).not.toContain("secret-check");
+
+    const json = await runCli(
+      ["gather", "--package", ".ghost", "--format", "json"],
+      dir,
+    );
+    expect(json.code).toBe(0);
+    const payload = JSON.parse(json.stdout);
+    const logo = payload.nodes.find(
+      (n: { id: string }) => n.id === "asset.logo",
+    );
+    expect(logo.materials).toBe(2);
+    expect(payload).not.toHaveProperty("checks");
+  });
+
+  it("fails validate when a node uses the removed `relates` key", async () => {
+    await writeFile(
+      join(dir, "manifest.yml"),
+      "schema: ghost.fingerprint-package/v1\nid: solo\n",
+    );
+    await writeFile(
+      join(dir, "n.md"),
+      "---\nrelates:\n  - to: nope/missing\n---\n\nBody.\n",
+    );
+
+    const validate = await runCli(["validate", "."], dir);
+    expect(validate.code).toBe(1);
+    expect(validate.stdout).toContain("relates");
+  });
+
+  it("gather carries each node's kind in the menu", async () => {
+    await writeGatherPackage(dir);
+
+    const result = await runCli(
+      ["gather", "--package", ".ghost", "--format", "json"],
+      dir,
+    );
+
+    expect(result.code).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    const byId = Object.fromEntries(
+      payload.nodes.map((n: { id: string; kind?: string }) => [n.id, n.kind]),
+    );
+    // Present as a key for every node (undefined when no kind is present).
+    expect(Object.keys(byId)).toContain("email/marketing/index");
+  });
+
+  it("review matches diff files to node materials and offers checks", async () => {
+    await runCli(["init", "--with", "checks"], dir);
+    await writeFile(
+      join(dir, ".ghost", "asset.logo.md"),
+      "---\ndescription: Logo.\nmaterials:\n  - brand/logo*.svg\n---\n\nLogo prose.\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "checks", "logo-clearspace.md"),
+      "---\nname: logo-clearspace\ndescription: Logo clearspace holds.\nseverity: medium\nreferences:\n  - asset.logo\n---\n\nGrade logo clearspace.\n",
+    );
+    const diff = [
+      "diff --git a/brand/logo.svg b/brand/logo.svg",
+      "--- a/brand/logo.svg",
+      "+++ b/brand/logo.svg",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+    ].join("\n");
+
+    const result = await runCli(
+      ["review", "--diff=-", "--format", "json"],
+      dir,
+      {
+        stdin: diff,
+      },
+    );
+
+    expect(result.code).toBe(0);
+    const packet = JSON.parse(result.stdout);
+    expect(packet.materialNodes[0]).toMatchObject({
+      id: "asset.logo",
+      files: ["brand/logo.svg"],
+      matchedMaterials: ["brand/logo*.svg"],
+    });
+    expect(packet.checks[0]).toMatchObject({
+      id: "logo-clearspace",
+      offered: "matched",
     });
   });
 
-  it("check treats inline color detectors as literal patterns, not exact values", async () => {
-    await writeCheckPackage(dir, { detectorPattern: "#000000" });
+  it("review runs check probes as evidence and supports --no-probes", async () => {
+    await runCli(["init", "--with", "checks"], dir);
     await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch("let colors = [Color(#000), Color.black]"),
+      join(dir, ".ghost", "asset.logo.md"),
+      "---\ndescription: Logo.\nmaterials:\n  - brand/logo.svg\n---\n\nLogo prose.\n",
     );
+    await writeFile(
+      join(dir, ".ghost", "checks", "logo-probe.md"),
+      "---\nname: logo-probe\ndescription: Probe logo evidence.\nseverity: low\nreferences:\n  - asset.logo\nprobe: node -e \"console.log('probe evidence')\"\n---\n\nUse probe evidence, then judge.\n",
+    );
+    const diff = [
+      "diff --git a/brand/logo.svg b/brand/logo.svg",
+      "--- a/brand/logo.svg",
+      "+++ b/brand/logo.svg",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+    ].join("\n");
 
-    const result = await runCli(
-      ["check", "--diff", "change.patch", "--format", "json"],
+    const probed = await runCli(
+      ["review", "--diff=-", "--format", "json"],
       dir,
+      {
+        stdin: diff,
+      },
     );
+    expect(probed.code).toBe(0);
+    expect(JSON.parse(probed.stdout).checks[0].probe).toMatchObject({
+      exitCode: 0,
+      stdout: "probe evidence\n",
+    });
 
-    expect(result.code, result.stderr).toBe(1);
-    const report = JSON.parse(result.stdout);
-    expect(report.result).toBe("fail");
-    expect(
-      report.findings.map((finding: { match: string }) => finding.match),
-    ).toEqual(["#000", "Color.black"]);
+    const skipped = await runCli(
+      ["review", "--diff=-", "--format", "json", "--no-probes"],
+      dir,
+      { stdin: diff },
+    );
+    expect(JSON.parse(skipped.stdout).checks[0].probe).toBeUndefined();
   });
 
-  it("check passes when active scoped checks do not match", async () => {
-    await writeCheckPackage(dir);
+  it("review auto-offers matched guard nodes without check references", async () => {
+    await runCli(["init", "--with", "checks"], dir);
     await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch("let color = CashTheme.primary"),
+      join(dir, ".ghost", "glossary.md"),
+      "---\nkinds:\n  - name: anti-goal\n    posture: guard\n---\n\n# anti-goal\n\nReview-critical replacements.\n",
     );
+    await writeFile(
+      join(dir, ".ghost", "anti-goal.generic-logo.md"),
+      "---\ndescription: Replace generic marks.\nmaterials:\n  - brand/logo.svg\n---\n\nNot a stock spark; instead use the wordmark and measured clearspace.\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "checks", "unrelated.md"),
+      "---\nname: unrelated\ndescription: Always review unrelated posture.\nseverity: low\nreferences:\n  - missing.future\n---\n\nReview unrelated things.\n",
+    );
+    const diff = [
+      "diff --git a/brand/logo.svg b/brand/logo.svg",
+      "--- a/brand/logo.svg",
+      "+++ b/brand/logo.svg",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+    ].join("\n");
 
-    const result = await runCli(["check", "--diff", "change.patch"], dir);
+    const result = await runCli(["review", "--diff=-"], dir, { stdin: diff });
 
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Design Check: PASS");
-  });
-
-  it("check passes when optional validate.yml is absent", async () => {
-    await writeCheckPackage(dir, { checks: false });
-    await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch("UIColor(#ffffff)"),
-    );
-
-    const result = await runCli(["check", "--diff", "change.patch"], dir);
-
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("No active deterministic check failures.");
-  });
-
-  it("review emits an advisory packet with required citation fields", async () => {
-    await writeCheckPackage(dir);
-    await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch("let color = CashTheme.primary"),
-    );
-
-    const result = await runCli(["review", "--diff", "change.patch"], dir);
-
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("# Ghost Advisory Review");
-    expect(result.stdout).toContain("## Selected Context");
-    expect(result.stdout).toContain("### Selected Context");
-    expect(result.stdout).toContain("#### Stack");
-    expect(result.stdout).toContain("#### Match");
-    expect(result.stdout).toContain("#### Context Hits");
-    expect(result.stdout).toContain("#### Suggested Reads");
-    expect(result.stdout).toContain("#### Omissions");
-    expect(result.stdout).toContain("#### Gaps");
-    expect(result.stdout).toContain("Status: path matched");
-    expect(result.stdout).toContain("Matched scopes: `lending`");
-    expect(result.stdout).toContain("diff location");
-    expect(result.stdout).toContain("fingerprint facet refs");
+    expect(result.stdout).toContain("## Matched guard nodes — review-critical");
     expect(result.stdout).toContain(
-      "selected-context gap or local-evidence rationale when context is silent",
+      "### `anti-goal.generic-logo` _(anti-goal)_",
     );
-    expect(result.stdout).toContain("Use the selected context first");
-    expect(result.stdout).toContain("active check when blocking");
-    expect(result.stdout).not.toContain("Proposal Threshold");
-    expect(result.stdout).toContain("provisional and non-Ghost-backed");
-    expect(result.stdout).not.toContain("recommend-proposal");
-    expect(result.stdout).toContain("missing-fingerprint");
-    expect(result.stdout).toContain("experience-gap");
-    expect(result.stdout).toContain("repair or intentional-divergence");
-    expect(result.stdout).not.toContain("schema: ghost.fingerprint/v1");
   });
 
-  it("review reports and truncates oversized diffs by byte budget", async () => {
-    await writeCheckPackage(dir);
+  it("export writes a portable tarball with export metadata and private events excluded", async () => {
+    await runCli(["init", "--with", "checks"], dir);
+    await mkdir(join(dir, ".ghost", "materials"), { recursive: true });
+    await writeFile(join(dir, ".ghost", ".events"), '{"event":"gather"}\n');
     await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch(`const copy = "${"x".repeat(160)}";`),
+      join(dir, ".ghost", "materials", "tokens.css"),
+      ":root{}\n",
+    );
+    await writeFile(
+      join(dir, ".ghost", "asset.tokens.md"),
+      "---\ndescription: Tokens.\nmaterials:\n  - materials/tokens.css\n  - https://example.com/tokens\n---\n\nToken prose.\n",
     );
 
-    const result = await runCli(
-      [
-        "review",
-        "--diff",
-        "change.patch",
-        "--max-diff-bytes",
-        "80",
-        "--format",
-        "json",
-      ],
-      dir,
-    );
+    const out = join(dir, "brand.tgz");
+    const result = await runCli(["export", "--out", out], dir);
 
     expect(result.code).toBe(0);
-    const packet = JSON.parse(result.stdout);
-    expect(packet.truncated).toBe(true);
-    expect(packet.budgets.max_diff_bytes).toBe(80);
-    expect(packet.budgets.diff_bytes).toBeGreaterThan(80);
-    expect(packet.budgets.included_diff_bytes).toBeLessThanOrEqual(80);
-    expect(packet.diff).toContain("Ghost truncated diff");
-    expect(packet.diff).not.toContain("x".repeat(120));
-  });
-
-  it("review markdown includes packet budget metadata", async () => {
-    await writeCheckPackage(dir);
-    await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch(`const copy = "${"x".repeat(160)}";`),
-    );
-
-    const result = await runCli(
-      ["review", "--diff", "change.patch", "--max-diff-bytes", "80"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("## Review Packet Budget");
-    expect(result.stdout).toContain("- Max diff bytes: 80");
-    expect(result.stdout).toContain("- Truncated: yes");
-    expect(result.stdout).toContain("Ghost truncated diff");
-  });
-
-  it("review rejects invalid max diff byte budgets", async () => {
-    await writeCheckPackage(dir);
-    await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch("let color = CashTheme.primary"),
-    );
-
-    const result = await runCli(
-      ["review", "--diff", "change.patch", "--max-diff-bytes", "0"],
-      dir,
-    );
-
-    expect(result.code).toBe(2);
-    expect(result.stderr).toContain(
-      "--max-diff-bytes must be a positive integer",
-    );
-  });
-
-  it("review omits removed memory fields", async () => {
-    await writeCheckPackage(dir);
-    await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch("let color = CashTheme.primary"),
-    );
-
-    const result = await runCli(
-      ["review", "--diff", "change.patch", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const packet = JSON.parse(result.stdout);
-    expect(packet.fingerprint.schema).toBe("ghost.fingerprint/v1");
-    expect(packet.finding_categories).toContain("experience-gap");
-    expect(packet.proposal_types).toBeUndefined();
-    expect(packet.open_proposals).toBeUndefined();
-    expect(packet.accepted_decisions).toBeUndefined();
-    expect(packet.intent).toBeUndefined();
-    expect(packet.memory).toBeUndefined();
-  });
-
-  it("rejects removed review memory flag", async () => {
-    await writeCheckPackage(dir);
-    await writeFile(
-      join(dir, "change.patch"),
-      lendingPatch("let color = CashTheme.primary"),
-    );
-
-    await expect(
-      runCli(
-        [
-          "review",
-          "--diff",
-          "change.patch",
-          "--include-memory",
-          "--format",
-          "json",
-        ],
-        dir,
-      ),
-    ).rejects.toThrow("Unknown option `--includeMemory`");
-  });
-
-  it("check routes changed files through nested stacks by default", async () => {
-    await writeNestedCheckPackage(dir);
-    await writeFile(
-      join(dir, "change.patch"),
-      webPatch("apps/checkout/review/page.tsx", 'const color = "#ffffff";'),
-    );
-
-    const result = await runCli(
-      ["check", "--diff", "change.patch", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const report = JSON.parse(result.stdout);
-    expect(report.schema).toBe("ghost.check-report/v1");
-    expect(report.result).toBe("pass");
-    expect(report.ghost_dir).toBe(".ghost");
-    expect(report.memory_dir).toBeUndefined();
-    expect(report.stacks[0].memory_dir).toBeUndefined();
-    expect(report.stacks[0].stack_dirs).toHaveLength(2);
-    expect(report.routed_files[0]).toMatchObject({
-      path: "apps/checkout/review/page.tsx",
-      checks: [],
+    expect(result.stdout).toContain("Locator audit");
+    expect(result.stdout).toContain("materials/tokens.css");
+    expect(result.stdout).toContain("HTTPS URL");
+    const archive = parseTarEntries(gunzipSync(await readFile(out)));
+    expect(archive.has("asset.tokens.md")).toBe(true);
+    expect(archive.has("export.yml")).toBe(true);
+    expect(archive.has("glossary.md")).toBe(true);
+    expect(archive.has("checks/example.md.example")).toBe(true);
+    expect(archive.has("manifest.yml")).toBe(true);
+    expect(archive.has("materials/tokens.css")).toBe(true);
+    expect(archive.has(".events")).toBe(false);
+    expect(
+      parseYaml(archive.get("export.yml")?.toString("utf-8") ?? ""),
+    ).toMatchObject({
+      schema: "ghost.export/v1",
+      id: "local",
+      cli: expect.any(String),
+      exported: expect.any(String),
     });
   });
 
-  it("--package keeps check in exact single-bundle mode", async () => {
-    await writeNestedCheckPackage(dir);
-    await writeFile(
-      join(dir, "change.patch"),
-      webPatch("apps/checkout/review/page.tsx", 'const color = "#ffffff";'),
-    );
+  it("export --no-checks excludes checks from the archive", async () => {
+    await runCli(["init", "--with", "checks"], dir);
 
-    const result = await runCli(
-      [
-        "check",
-        "--diff",
-        "change.patch",
-        "--package",
-        ".ghost",
-        "--format",
-        "json",
-      ],
-      dir,
-    );
-
-    expect(result.code).toBe(1);
-    const report = JSON.parse(result.stdout);
-    expect(report.schema).toBe("ghost.check-report/v1");
-    expect(report.findings[0].check_id).toBe("no-hardcoded-color");
-    expect(report.findings[0]).toMatchObject({
-      path: "apps/checkout/review/page.tsx",
-      line: 1,
-      title: "No hardcoded colors",
-      severity: "serious",
-      detector: "forbidden-regex",
-      message: "Added UI code matched a forbidden pattern.",
-      match: "#ffffff",
-    });
-    expect(report.stacks).toBeUndefined();
-  });
-
-  it("resolves stack checks from a custom package directory", async () => {
-    await writeNestedCheckPackage(dir, ".design/memory");
-    await writeFile(
-      join(dir, "change.patch"),
-      webPatch("apps/checkout/review/page.tsx", 'const color = "#ffffff";'),
-    );
-
-    const result = await runCli(
-      ["check", "--diff", "change.patch", "--format", "json"],
-      dir,
-      { env: { GHOST_PACKAGE_DIR: ".design/memory" } },
-    );
+    const out = join(dir, "brand-no-checks.tgz");
+    const result = await runCli(["export", "--out", out, "--no-checks"], dir);
 
     expect(result.code).toBe(0);
-    const report = JSON.parse(result.stdout);
-    expect(report.ghost_dir).toBe(".design/memory");
-    expect(report.memory_dir).toBeUndefined();
-    expect(report.stacks[0]).toMatchObject({
-      ghost_dir: ".design/memory",
-      changed_files: ["apps/checkout/review/page.tsx"],
+    const archive = parseTarEntries(gunzipSync(await readFile(out)));
+    expect([...archive.keys()].some((path) => path.startsWith("checks/"))).toBe(
+      false,
+    );
+  });
+
+  it("export audits bundled, URL, and referenced local material locators", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await mkdir(join(dir, ".ghost", "materials"), { recursive: true });
+    await mkdir(join(dir, "brand"), { recursive: true });
+    await writeFile(
+      join(dir, ".ghost", "materials", "tokens.css"),
+      ":root{}\n",
+    );
+    await writeFile(join(dir, "brand", "voice.txt"), "Plain.\n");
+    await writeFile(
+      join(dir, ".ghost", "asset.tokens.md"),
+      "---\ndescription: Tokens.\nmaterials:\n  - materials/tokens.css\n  - brand/voice.txt\n  - https://example.com/tokens\n---\n\nToken prose.\n",
+    );
+
+    const result = await runCli(["export", "--format", "json"], dir);
+
+    expect(result.code).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload).toMatchObject({
+      kind: "export",
+      id: "local",
+      archive: expect.stringContaining("local-fingerprint.tgz"),
     });
-    expect(report.stacks[0].memory_dir).toBeUndefined();
-    expect(report.stacks[0].stack_dirs).toEqual([
-      await realpath(join(dir, ".design", "memory")),
-      await realpath(join(dir, "apps", "checkout", ".design", "memory")),
+    expect(payload.audit.travels).toEqual([
+      {
+        nodeId: "asset.tokens",
+        locator: "materials/tokens.css",
+        tier: "bundled",
+      },
+      {
+        nodeId: "asset.tokens",
+        locator: "https://example.com/tokens",
+        tier: "url",
+      },
+    ]);
+    expect(payload.audit.stranded).toEqual([
+      { nodeId: "asset.tokens", locator: "brand/voice.txt" },
     ]);
   });
 
-  it("review emits stack packets for mixed diffs", async () => {
-    await writeNestedCheckPackage(dir);
+  it("export --strict exits 2 when referenced local material locators are stranded", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
     await writeFile(
-      join(dir, "change.patch"),
-      [
-        webPatch("apps/checkout/review/page.tsx", "const x = CheckoutTheme;"),
-        webPatch("shared/home.tsx", "const x = RootTheme;"),
-      ].join("\n"),
+      join(dir, ".ghost", "asset.voice.md"),
+      "---\ndescription: Voice.\nmaterials:\n  - brand/voice.txt\n---\n\nVoice prose.\n",
     );
 
-    const result = await runCli(
-      ["review", "--diff", "change.patch", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const packet = JSON.parse(result.stdout);
-    expect(packet.stacks).toHaveLength(2);
-    expect(packet.stacks[0].ghost_dir).toBe(".ghost");
-    expect(packet.stacks[0].memory_dir).toBeUndefined();
-    expect(packet.stacks[0].merged.fingerprint.intent.summary.product).toBe(
-      "Checkout",
-    );
-    expect(packet.stacks[0].stack_dirs).toHaveLength(2);
-    expect(packet.stacks[1].stack_dirs).toHaveLength(1);
-  });
-
-  it("stack inspects resolved nested packages", async () => {
-    await writeNestedCheckPackage(dir);
-
-    const result = await runCli(
-      ["stack", "apps/checkout/review/page.tsx", "--format", "json"],
-      dir,
-    );
-
-    expect(result.code).toBe(0);
-    const stacks = JSON.parse(result.stdout);
-    expect(stacks[0].stack).toHaveLength(2);
-    expect(stacks[0].ghost_dir).toBe(".ghost");
-    expect(stacks[0].memory_dir).toBeUndefined();
-    expect(stacks[0].stack[0].memory_dir).toBeUndefined();
-    expect(stacks[0].merged.fingerprint.intent.summary.product).toBe(
-      "Checkout",
-    );
-  });
-
-  it("rejects unsafe package directory env overrides", async () => {
-    const result = await runCli(["stack", "."], dir, {
-      env: { GHOST_PACKAGE_DIR: "../outside" },
-    });
+    const result = await runCli(["export", "--strict"], dir);
 
     expect(result.code).toBe(2);
-    expect(result.stderr).toContain("GHOST_PACKAGE_DIR must not contain");
+    expect(result.stdout).toContain("brand/voice.txt");
+    expect(result.stdout).toContain("Bundle it into `.ghost/materials/`");
   });
 
-  it("emit review-command resolves merged fingerprint stack for --path", async () => {
-    await writeNestedCheckPackage(dir);
-
-    const result = await runCli(
-      [
-        "emit",
-        "review-command",
-        "--path",
-        "apps/checkout/review/page.tsx",
-        "--stdout",
-      ],
-      dir,
+  it("commands work against an unpacked export directory outside a git repo", async () => {
+    await runCli(["init", "--template", "minimal"], dir);
+    await mkdir(join(dir, ".ghost", "materials"), { recursive: true });
+    await writeFile(
+      join(dir, ".ghost", "materials", "tokens.css"),
+      ":root{}\n",
     );
+    await writeFile(
+      join(dir, ".ghost", "asset.tokens.md"),
+      "---\ndescription: Tokens.\nmaterials:\n  - materials/tokens.css\n---\n\nToken prose.\n",
+    );
+    const out = join(dir, "portable.tgz");
+    await runCli(["export", "--out", out], dir);
 
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain("RootTheme");
-    expect(result.stdout).toContain("Checkout");
-    expect(result.stdout).toContain("CheckoutTheme");
+    const receiver = join(dir, "receiver");
+    const unpacked = join(receiver, "fingerprint");
+    await mkdir(unpacked, { recursive: true });
+    const archive = parseTarEntries(gunzipSync(await readFile(out)));
+    await writeEntries(unpacked, archive);
+
+    const validate = await runCli(
+      ["validate", "--package", unpacked],
+      receiver,
+    );
+    expect(validate.code).toBe(0);
+    const gather = await runCli(
+      ["gather", "--package", unpacked, "--format", "json"],
+      receiver,
+    );
+    expect(gather.code).toBe(0);
+    expect(JSON.parse(gather.stdout).nodes).toContainEqual(
+      expect.objectContaining({ id: "asset.tokens" }),
+    );
+    const pull = await runCli(
+      ["pull", "asset.tokens", "--package", unpacked],
+      receiver,
+    );
+    expect(pull.code).toBe(0);
+    expect(pull.stdout).toContain(":root{}");
   });
 
-  it("init --scope creates a nested .ghost bundle", async () => {
-    const result = await runCli(
-      ["init", "--scope", "apps/checkout", "--format", "json"],
-      dir,
-    );
+  it("checks init scaffolds .ghost/checks/ with an example", async () => {
+    await runCli(["init"], dir);
 
-    expect(result.code).toBe(0);
-    const out = JSON.parse(result.stdout);
-    expect(await realpath(out.dir)).toBe(
-      await realpath(join(dir, "apps", "checkout", ".ghost")),
-    );
-    const manifest = await readFile(
-      join(dir, "apps", "checkout", ".ghost", "manifest.yml"),
-      "utf-8",
-    );
-    expect(manifest).toContain("ghost.fingerprint-package/v1");
-    const intent = await readFile(
-      join(dir, "apps", "checkout", ".ghost", "intent.yml"),
-      "utf-8",
-    );
-    expect(intent).not.toContain("review_policy");
-    expect(intent).not.toContain("proposal");
+    const add = await runCli(["checks", "init", "--format", "json"], dir);
+    expect(add.code).toBe(0);
+    const added = JSON.parse(add.stdout);
+    expect(added.written).toEqual(["example.md.example"]);
+    await expect(
+      readFile(join(dir, ".ghost", "checks", "example.md.example"), "utf-8"),
+    ).resolves.toContain("references:");
+
+    // Running init twice is a usage error.
+    const again = await runCli(["checks", "init"], dir);
+    expect(again.code).toBe(2);
+    expect(again.stderr).toContain("already exists");
+
+    // The scaffold validates cleanly (example.md.example is inert).
+    const validate = await runCli(["validate"], dir);
+    expect(validate.code).toBe(0);
   });
 
-  it("init --scope creates a nested package under a custom package directory", async () => {
-    const result = await runCli(
-      ["init", "--scope", "apps/checkout", "--format", "json"],
-      dir,
-      { env: { GHOST_PACKAGE_DIR: ".design/memory" } },
-    );
-
-    expect(result.code).toBe(0);
-    const out = JSON.parse(result.stdout);
-    expect(await realpath(out.dir)).toBe(
-      await realpath(join(dir, "apps", "checkout", ".design", "memory")),
-    );
-    expect(
-      await readFile(
-        join(dir, "apps", "checkout", ".design", "memory", "manifest.yml"),
-        "utf-8",
-      ),
-    ).toContain("ghost.fingerprint-package/v1");
+  it("checks rejects unknown actions", async () => {
+    await runCli(["init"], dir);
+    const result = await runCli(["checks", "remove"], dir);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("supports `init`");
   });
 
-  it("lint --all and verify --all include nested packages", async () => {
-    await writeNestedCheckPackage(dir);
-
-    const lint = await runCli(["lint", "--all", "--format", "json"], dir);
-    const verify = await runCli(["verify", "--all", "--format", "json"], dir);
-    const scan = await runCli(
-      ["scan", "--include-nested", "--format", "json"],
-      dir,
-    );
-
-    expect(lint.code).toBe(0);
-    expect(verify.code).toBe(0);
-    expect(JSON.parse(scan.stdout).nested_packages).toHaveLength(2);
+  it("init --with rejects unknown capabilities", async () => {
+    const result = await runCli(["init", "--with", "spectre"], dir);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("Unknown --with capability 'spectre'");
   });
 
-  it("lint, verify, and scan discover nested custom fingerprint directories", async () => {
-    await writeNestedCheckPackage(dir, ".design/memory");
+  it("review without a checks directory exits with an init hint", async () => {
+    await runCli(["init"], dir);
+    const result = await runCli(["review", "--diff=-"], dir, { stdin: "" });
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("ghost checks init");
+  });
 
-    const lint = await runCli(["lint", "--all", "--format", "json"], dir, {
-      env: { GHOST_PACKAGE_DIR: ".design/memory" },
-    });
-    const verify = await runCli(["verify", "--all", "--format", "json"], dir, {
-      env: { GHOST_PACKAGE_DIR: ".design/memory" },
-    });
-    const scan = await runCli(
-      ["scan", "--include-nested", "--format", "json"],
-      dir,
-      { env: { GHOST_PACKAGE_DIR: ".design/memory" } },
-    );
-
-    expect(lint.code).toBe(0);
-    expect(verify.code).toBe(0);
-    expect(JSON.parse(scan.stdout).nested_packages).toHaveLength(2);
+  it("validate flags the legacy haunts/ directory", async () => {
+    await runCli(["init"], dir);
+    await mkdir(join(dir, ".ghost", "haunts", "checks"), { recursive: true });
+    const result = await runCli(["validate"], dir);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("no longer supported");
   });
 });
+
+function parseTarEntries(buffer: Buffer): Map<string, Buffer> {
+  const entries = new Map<string, Buffer>();
+  let offset = 0;
+  while (offset + 512 <= buffer.byteLength) {
+    const header = buffer.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const name = readTarString(header, 0, 100);
+    const prefix = readTarString(header, 345, 155);
+    const sizeText = readTarString(header, 124, 12).replace(/\0/g, "").trim();
+    const size = Number.parseInt(sizeText || "0", 8);
+    const path = prefix ? `${prefix}/${name}` : name;
+    const dataStart = offset + 512;
+    entries.set(path, buffer.subarray(dataStart, dataStart + size));
+    offset = dataStart + Math.ceil(size / 512) * 512;
+  }
+  return entries;
+}
+
+function readTarString(buffer: Buffer, offset: number, length: number): string {
+  const slice = buffer.subarray(offset, offset + length);
+  const end = slice.indexOf(0);
+  return slice.subarray(0, end === -1 ? slice.length : end).toString("utf-8");
+}
+
+async function writeEntries(
+  root: string,
+  entries: Map<string, Buffer>,
+): Promise<void> {
+  for (const [path, data] of entries) {
+    await mkdir(join(root, path, ".."), { recursive: true });
+    await writeFile(join(root, path), data);
+  }
+}
+
+async function writeGatherPackage(dir: string): Promise<void> {
+  const ghost = join(dir, ".ghost");
+  await mkdir(join(ghost, "email", "marketing"), { recursive: true });
+  await mkdir(join(ghost, "checkout"), { recursive: true });
+  await writeFile(
+    join(ghost, "manifest.yml"),
+    "schema: ghost.fingerprint-package/v1\nid: gather-demo\n",
+  );
+  // Directories are a browsing convenience only; ids are paths minus .md.
+  await writeFile(
+    join(ghost, "index.md"),
+    "---\ndescription: Brand voice.\n---\n\nWarm and concise.\n",
+  );
+  await writeFile(
+    join(ghost, "email", "index.md"),
+    "---\ndescription: Email surface.\n---\n\nEmail.\n",
+  );
+  await writeFile(
+    join(ghost, "email", "marketing", "index.md"),
+    "---\ndescription: Marketing email.\n---\n\nMarketing may use urgency.\n",
+  );
+  await writeFile(
+    join(ghost, "checkout", "clarity.md"),
+    "---\n---\n\nCheckout copy is plain.\n",
+  );
+}
 
 async function writeCheckPackage(
   dir: string,
@@ -2742,18 +1836,11 @@ intent:
       check_refs: [validate.check:no-hardcoded-ui-color]
   experience_contracts: []
 inventory:
-  topology:
-    scopes:
-      - id: lending
-        paths: [Code/Features/Lending]
-        surface_types: [native-feature]
-    surface_types: [native-feature]
   exemplars:
     - id: lending-tokenized-screen
       path: Code/Features/Lending/LendingUI
       title: Lending tokenized UI
-      surface_type: native-feature
-      scope: lending
+      surface: lending
       why: Shows semantic CashTheme color usage for native lending UI.
       refs:
         - intent.principle:tokenized-ui-color
@@ -2782,7 +1869,6 @@ checks:
       composition: [composition.pattern:tokenized-ui-color]
       inventory: [inventory.exemplar:lending-tokenized-screen]
     applies_to:
-      scopes: [lending]
       paths: [Code/Features/Lending]
     detector:
       type: forbidden-regex
@@ -2801,7 +1887,6 @@ checks:
     derivation:
       intent: [intent.principle:tokenized-ui-color]
     applies_to:
-      scopes: [lending]
       paths: [Code/Features/Lending]
     detector:
       type: required-regex
@@ -2843,7 +1928,7 @@ composition_patterns: []
   );
 }
 
-async function writeRelayRequestStackScenario(dir: string): Promise<void> {
+async function _writeRelayRequestStackScenario(dir: string): Promise<void> {
   await mkdir(join(dir, "stacks"), { recursive: true });
   await mkdir(join(dir, "media", "email"), { recursive: true });
   await writeFile(
@@ -2889,7 +1974,7 @@ units:
   );
 }
 
-async function writeRelayRequestOnlyScenario(
+async function _writeRelayRequestOnlyScenario(
   dir: string,
   options: { invalidUnitSection?: boolean } = {},
 ): Promise<void> {
@@ -2937,80 +2022,48 @@ units:
   );
 }
 
-async function writeCoveredSyncManifest(
-  dir: string,
-  options: { tracked: string },
-): Promise<void> {
-  const ackedAt = "2026-06-16T00:00:00.000Z";
-  await writeFile(
-    join(dir, ".ghost-sync.json"),
-    JSON.stringify(
-      {
-        tracks: { type: "path", value: options.tracked },
-        ackedAt,
-        trackedFingerprintId: "tracked",
-        localFingerprintId: "local",
-        overallDistance: 0,
-        dimensions: {
-          spacing: { distance: 0, stance: "accepted", ackedAt },
-          palette: { distance: 0, stance: "accepted", ackedAt },
-          typography: { distance: 0, stance: "accepted", ackedAt },
-          surfaces: { distance: 0, stance: "accepted", ackedAt },
-          decisions: { distance: 0, stance: "accepted", ackedAt },
-        },
-      },
-      null,
-      2,
-    ),
-  );
-}
-
 async function writeSplitFingerprintPackage(
   pkg: string,
   fingerprintRaw: string,
   checksRaw?: string,
 ): Promise<void> {
+  // Node package: derive prose nodes from the legacy facet doc's
+  // principles/patterns so check-routing/grounding fixtures keep working.
   const packageDir = pkg;
-  const doc = parseYaml(fingerprintRaw) as Record<string, unknown>;
-  await mkdir(packageDir, { recursive: true });
-  await Promise.all([
+  const doc = parseYaml(fingerprintRaw) as {
+    intent?: { principles?: Array<{ id: string; principle?: string }> };
+    composition?: { patterns?: Array<{ id: string; pattern?: string }> };
+  };
+  await mkdir(join(packageDir, "nodes"), { recursive: true });
+  const writes: Array<Promise<void>> = [
     writeFile(
       join(packageDir, "manifest.yml"),
       "schema: ghost.fingerprint-package/v1\nid: local\n",
     ),
-    writeFile(
-      join(packageDir, "intent.yml"),
-      stringifyYaml(
-        doc.intent ?? {
-          summary: {},
-          situations: [],
-          principles: [],
-          experience_contracts: [],
-        },
+  ];
+  for (const p of doc.intent?.principles ?? []) {
+    writes.push(
+      writeFile(
+        join(packageDir, "nodes", `${p.id}.md`),
+        `---\nid: ${p.id}\nunder: core\n---\n\n${p.principle ?? p.id}\n`,
       ),
-    ),
-    writeFile(
-      join(packageDir, "inventory.yml"),
-      stringifyYaml(
-        doc.inventory ?? {
-          topology: {},
-          building_blocks: {},
-          exemplars: [],
-          sources: [],
-        },
+    );
+  }
+  for (const p of doc.composition?.patterns ?? []) {
+    writes.push(
+      writeFile(
+        join(packageDir, "nodes", `${p.id}.md`),
+        `---\nid: ${p.id}\nunder: core\n---\n\n${p.pattern ?? p.id}\n`,
       ),
-    ),
-    writeFile(
-      join(packageDir, "composition.yml"),
-      stringifyYaml(doc.composition ?? { patterns: [] }),
-    ),
-    ...(checksRaw
-      ? [writeFile(join(packageDir, "validate.yml"), checksRaw)]
-      : []),
-  ]);
+    );
+  }
+  if (checksRaw) {
+    writes.push(writeFile(join(packageDir, "validate.yml"), checksRaw));
+  }
+  await Promise.all(writes);
 }
 
-function checksFileWithDerivation(intentRef: string): string {
+function _checksFileWithDerivation(intentRef: string): string {
   return `schema: ghost.validate/v1
 id: local
 checks:
@@ -3031,201 +2084,6 @@ checks:
       observed_count: 47
       examples:
         - Code/Features/Lending/LendingUI
-`;
-}
-
-async function writeNestedCheckPackage(
-  dir: string,
-  ghostDir = ".ghost",
-): Promise<void> {
-  const rootPackage = packagePath(dir, ghostDir);
-  const checkoutPackage = packagePath(join(dir, "apps", "checkout"), ghostDir);
-  await mkdir(join(dir, "apps", "checkout", "review"), { recursive: true });
-  await mkdir(join(dir, "shared"), { recursive: true });
-  await writeFile(join(dir, "apps", "checkout", "review", "page.tsx"), "");
-  await writeFile(join(dir, "shared", "home.tsx"), "");
-
-  await writeSplitFingerprintPackage(
-    rootPackage,
-    `schema: ghost.fingerprint/v1
-intent:
-  summary:
-    product: Root Product
-  situations: []
-  principles: []
-  experience_contracts: []
-inventory:
-  topology:
-    scopes:
-      - id: app
-        paths: [apps, shared]
-    surface_types: [web-app]
-  building_blocks:
-    tokens: [RootTheme]
-composition:
-  patterns:
-    - id: root-token-pattern
-      kind: visual
-      pattern: Web UI color uses semantic product tokens.
-`,
-    `schema: ghost.validate/v1
-id: root
-checks:
-  - id: no-hardcoded-color
-    title: No hardcoded colors
-    status: active
-    severity: serious
-    derivation:
-      composition: [composition.pattern:root-token-pattern]
-    applies_to:
-      paths: [apps, shared]
-    detector:
-      type: forbidden-regex
-      pattern: '#[0-9a-fA-F]{3,8}'
-      contexts: [react]
-    evidence:
-      support: 0.93
-      observed_count: 8
-      examples:
-        - shared/home.tsx
-`,
-  );
-
-  await writeSplitFingerprintPackage(
-    checkoutPackage,
-    `schema: ghost.fingerprint/v1
-intent:
-  summary:
-    product: Checkout
-  situations: []
-  principles: []
-  experience_contracts: []
-inventory:
-  topology:
-    scopes:
-      - id: checkout
-        paths: [review]
-        surface_types: [payment-review]
-    surface_types: [payment-review]
-  building_blocks:
-    tokens: [CheckoutTheme]
-composition:
-  patterns:
-    - id: checkout-token-pattern
-      kind: visual
-      pattern: Checkout review uses checkout product tokens.
-      applies_to:
-        paths: [review]
-`,
-    `schema: ghost.validate/v1
-id: checkout
-checks:
-  - id: no-hardcoded-color
-    title: No hardcoded colors
-    status: disabled
-    severity: serious
-    detector:
-      type: forbidden-regex
-      pattern: '#[0-9a-fA-F]{3,8}'
-      contexts: [react]
-`,
-  );
-}
-
-function packagePath(root: string, ghostDir: string): string {
-  return join(root, ...ghostDir.split("/"));
-}
-
-function webPatch(path: string, added: string): string {
-  return `diff --git a/${path} b/${path}
-index 1111111..2222222 100644
---- a/${path}
-+++ b/${path}
-@@ -0,0 +1 @@
-+${added}
-`;
-}
-
-async function writeComparableBundle(
-  pkg: string,
-  patternId: string,
-): Promise<void> {
-  await mkdir(pkg, { recursive: true });
-  await writeSplitFingerprintPackage(
-    pkg,
-    `schema: ghost.fingerprint/v1
-intent:
-  summary:
-    product: ${patternId}
-inventory:
-  topology:
-    surface_types: [settings]
-  building_blocks:
-    tokens: [${patternId}-token]
-composition:
-  patterns:
-    - id: ${patternId}
-      kind: layout
-      pattern: ${patternId} uses a settings-oriented layout.
-`,
-  );
-  await writeFile(
-    join(pkg, "survey.json"),
-    JSON.stringify({
-      schema: "ghost.survey/v1",
-      sources: [
-        { id: patternId, target: ".", scanned_at: "2026-05-10T00:00:00Z" },
-      ],
-      values: [
-        {
-          id: `value_${patternId}`,
-          source: { target: ".", scanned_at: "2026-05-10T00:00:00Z" },
-          kind: "spacing",
-          value: "8px",
-          raw: "p-2",
-          occurrences: 4,
-          files_count: 2,
-        },
-      ],
-      tokens: [],
-      components: [],
-      ui_surfaces: [
-        {
-          id: `surface_${patternId}`,
-          source: { target: ".", scanned_at: "2026-05-10T00:00:00Z" },
-          name: patternId,
-          kind: "route",
-          locator: `/${patternId}`,
-          renderability: "source-only",
-          files: [`src/${patternId}.tsx`],
-          classification: { surface_type: "settings" },
-          signals: { layout_patterns: [patternId] },
-        },
-      ],
-    }),
-  );
-  await writeFile(
-    join(pkg, "patterns.yml"),
-    `schema: ghost.patterns/v1
-id: ${patternId}
-surface_types:
-  - id: settings
-    preferred_patterns: [${patternId}]
-composition_patterns:
-  - id: ${patternId}
-    surface_types: [settings]
-    evidence:
-      - locator: /${patternId}
-`,
-  );
-}
-
-function lendingPatch(line: string): string {
-  return `diff --git a/Code/Features/Lending/View.swift b/Code/Features/Lending/View.swift
---- a/Code/Features/Lending/View.swift
-+++ b/Code/Features/Lending/View.swift
-@@ -0,0 +1,1 @@
-+${line}
 `;
 }
 

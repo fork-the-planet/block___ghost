@@ -1,4 +1,4 @@
-import { useStaggerReveal } from "ghost-ui";
+import { useStaggerReveal } from "@design-intelligence/vessel";
 import { Hero } from "@/components/docs/hero";
 import { SectionWrapper } from "@/components/docs/wrappers";
 
@@ -29,121 +29,52 @@ export default function Home() {
           </p>
           <div className="space-y-5 text-muted-foreground leading-relaxed">
             <p className="thesis-item">
-              Agents can assemble UI. What they cannot reliably preserve is the
-              surface composition that UI belongs to.
+              <span className="text-foreground">Brand is not the logo.</span>{" "}
+              It&apos;s the accumulated stance behind everything you ship: what
+              you say plainly, where you slow down, what you refuse to do, how
+              you behave at the moment someone trusts you. It flows through
+              every surface — the screen, the email, the empty state, the
+              sentence.
             </p>
             <p className="thesis-item">
-              For years, design systems solved a human assembly problem. They
-              gave teams shared tokens, components, examples, and usage rules so
-              new surfaces could be composed from known parts.
+              <span className="text-foreground">Agents now do the making.</span>{" "}
+              They&apos;re fast, they&apos;re capable, and they hold nothing
+              they aren&apos;t handed. Every generated screen and sentence is an
+              answer to a question the agent was never asked:{" "}
+              <em className="text-foreground">
+                what would this brand do here?
+              </em>
             </p>
             <p className="thesis-item">
-              That layer still matters, but agents change the scarce layer.
-              Models can copy local patterns and recombine components. They do
-              not consistently preserve the composition that makes a product
-              surface feel intentional: hierarchy, density, restraint, behavior,
-              copy, accessibility, trust, and flow.
+              <span className="text-foreground">
+                Ghost writes the answer down, where the making happens.
+              </span>{" "}
+              The fingerprint is a portable steering packet: plain prose truths,
+              one file each, checked into the repo. A truth is stated once, at
+              the altitude it is actually true — &ldquo;near the moment of
+              payment, reduce felt risk&rdquo; — and steers whatever is being
+              made from it. Any agent reads the same packet: Claude, Codex,
+              Cursor, Goose. Any medium takes the same steer: a screen, a page,
+              a sentence. It travels with the repo, and it outlives your choice
+              of agent.
             </p>
             <p className="thesis-item">
-              Ghost captures the composition of a product surface: the intent
-              behind it, the materials it draws from, and the patterns that make
-              it feel intentional.
+              <span className="text-foreground">
+                Around the packet, machinery — and only machinery.
+              </span>{" "}
+              <code>ghost gather</code> emits the menu of truths;{" "}
+              <code>ghost pull</code> delivers the ones that fit the task;{" "}
+              <code>ghost review</code> assembles an advisory packet after the
+              work, never during. The CLI computes and never decides. The packet
+              is the product; the CLI is the courier.
             </p>
             <p className="thesis-item">
-              It stores that composition as checked-in fingerprint facets: which
-              intent shapes the surface, which materials agents can draw from,
-              which situations change the obligation, which patterns hold the
-              surface together, and which examples show it at its best.
-            </p>
-            <p className="thesis-item">
-              Components, tokens, and libraries become implementation material.
-              Ghost does not replace them. It gives agents the surface context
-              that tells them when and how those materials belong.
-            </p>
-            <p className="thesis-item">Ghost keeps that model compact:</p>
-            <ul className="thesis-item list-disc space-y-2 pl-6">
-              <li>
-                <code>.ghost/</code> is the default portable fingerprint package
-              </li>
-              <li>
-                <code>intent.yml</code>, <code>inventory.yml</code>, and{" "}
-                <code>composition.yml</code> store the three facets
-              </li>
-              <li>
-                <code>validate.yml</code> stores optional deterministic gates
-                grounded in fingerprint refs
-              </li>
-              <li>
-                ordinary Git review separates draft fingerprint edits from
-                checked-in truth
-              </li>
-            </ul>
-            <p className="thesis-item">
-              The split is deliberate. <code>intent.yml</code> captures the
-              intent behind the surface. <code>inventory.yml</code> captures the
-              materials it draws from. <code>composition.yml</code> captures the
-              patterns that make it feel intentional. Checks validate output;
-              they are not generation input.
-            </p>
-            <p className="thesis-item">A typical loop becomes:</p>
-            <ol className="thesis-item list-decimal space-y-2 pl-6">
-              <li>Brief from the fingerprint facets and exemplars</li>
-              <li>Generate or edit with the host agent</li>
-              <li>Run active deterministic checks and advisory review</li>
-              <li>
-                Fix code, explain intentional divergence, or update the Ghost
-                package through Git
-              </li>
-            </ol>
-            <p className="thesis-item">
-              Ghost stays bring-your-own-agent. The agent reads, decides, and
-              writes. Ghost does the repeatable work: initialization, schema
-              validation, inventory, evidence verification, checks, advisory
-              review packets, comparison, and upstream handoff packets.
-            </p>
-            <p className="thesis-item">
-              This is critical because surface composition that cannot be
-              recalled or evaluated cannot be delegated. A product surface that
-              only its original author can assess is not transferable: to
-              agents, to new engineers, or to forks of the product.
-            </p>
-            <p className="thesis-item">
-              Drift becomes measurable within this system. When generated or
-              modified UI diverges from checked-in fingerprint facets, the
-              failure is not just error; it is signal. Drift can originate from:
-            </p>
-            <ul className="thesis-item list-disc space-y-2 pl-6">
-              <li>incorrect generation: agent failure</li>
-              <li>missing-fingerprint: under-specified surface context</li>
-              <li>intentional product evolution</li>
-            </ul>
-            <p className="thesis-item">
-              Ghost does not eliminate drift; it surfaces and localizes it. The
-              system's boundary becomes visible where composition fails.
-            </p>
-            <p className="thesis-item">
-              The fingerprint package must live where generation happens: in the
-              repository, versioned alongside the code it governs. As the
-              product changes, fingerprint edits move through the same ordinary
-              Git review that introduces new UI.
-            </p>
-            <p className="thesis-item">
-              This leads to a practical governance model. Each repository owns
-              its product-surface fingerprint. Advanced workflows can add nested
-              packages for product areas, custom fingerprint directories for
-              host wrappers, comparison across systems, and declared drift
-              stances.
-            </p>
-            <p className="thesis-item">
-              Across an organization, the collection of Ghost packages forms a
-              higher-order map: a distributed model of product-surface
-              composition as it is actually practiced, not as it is only
-              described.
-            </p>
-            <p className="thesis-item">
-              Design systems were libraries for humans. Ghost is composition
-              context for agents: every surface can carry the fingerprint it
-              extends, and every deviation can carry evidence.
+              <span className="text-foreground">
+                Brand used to survive by being remembered
+              </span>{" "}
+              — carried in heads, enforced one review comment at a time. Ghost
+              makes it something stronger: written once, read before anything is
+              made, carried by everything that ships.
             </p>
           </div>
         </section>

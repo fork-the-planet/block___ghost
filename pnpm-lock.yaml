@@ -44,6 +44,9 @@ importers:
 
   apps/docs:
     dependencies:
+      '@design-intelligence/vessel':
+        specifier: workspace:*
+        version: link:../../packages/vessel
       '@hookform/resolvers':
         specifier: ^5.2.2
         version: 5.2.2(react-hook-form@7.72.1(react@19.1.0))
@@ -170,9 +173,6 @@ importers:
       embla-carousel-react:
         specifier: ^8.6.0
         version: 8.6.0(react@19.1.0)
-      ghost-ui:
-        specifier: workspace:*
-        version: link:../../packages/ghost-ui
       gsap:
         specifier: ^3.14.2
         version: 3.15.0
@@ -309,12 +309,6 @@ importers:
       cac:
         specifier: ^6.7.14
         version: 6.7.14
-      jiti:
-        specifier: ^2.4.0
-        version: 2.6.1
-      tinyglobby:
-        specifier: ^0.2.16
-        version: 0.2.16
       yaml:
         specifier: ^2.8.3
         version: 2.8.3
@@ -322,22 +316,7 @@ importers:
         specifier: ^4.3.6
         version: 4.3.6
 
-  packages/ghost-fleet:
-    dependencies:
-      '@anarchitecture/ghost':
-        specifier: workspace:*
-        version: link:../ghost
-      cac:
-        specifier: ^6.7.14
-        version: 6.7.14
-      yaml:
-        specifier: ^2.8.3
-        version: 2.8.3
-      zod:
-        specifier: ^4.3.6
-        version: 4.3.6
-
-  packages/ghost-ui:
+  packages/vessel:
     dependencies:
       '@hookform/resolvers':
         specifier: ^5.2.2
@@ -561,7 +540,7 @@ importers:
         version: 2.6.1
       postcss:
         specifier: ^8.5.8
-        version: 8.5.10
+        version: 8.5.15
       react:
         specifier: 19.1.0
         version: 19.1.0
@@ -10707,7 +10686,7 @@ snapshots:
       node-fetch: 3.3.2
       open: 11.0.0
       ora: 8.2.0
-      postcss: 8.5.10
+      postcss: 8.5.15
       postcss-selector-parser: 7.1.1
       prompts: 2.4.2
       recast: 0.23.11
@@ -11184,7 +11163,7 @@ snapshots:
       esbuild: 0.25.12
       fdir: 6.5.0(picomatch@4.0.4)
       picomatch: 4.0.4
-      postcss: 8.5.10
+      postcss: 8.5.15
       rollup: 4.60.2
       tinyglobby: 0.2.16
     optionalDependencies:

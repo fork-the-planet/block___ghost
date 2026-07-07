@@ -12,7 +12,7 @@ import {
   TooltipContent,
   TooltipTrigger,
   useTheme,
-} from "ghost-ui";
+} from "@design-intelligence/vessel";
 import type { LucideIcon } from "lucide-react";
 import {
   BookOpen,
@@ -224,6 +224,15 @@ export function Dock() {
               <BookOpen className="mr-2 size-4" />
               CLI Reference
             </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                navigate("/docs/checks-and-review");
+                setSearchOpen(false);
+              }}
+            >
+              <BookOpen className="mr-2 size-4" />
+              Checks And Review
+            </CommandItem>
           </CommandGroup>
 
           <CommandGroup heading="Tools">
@@ -234,7 +243,7 @@ export function Dock() {
               }}
             >
               <Wrench className="mr-2 size-4" />
-              ghost scan
+              ghost gather
             </CommandItem>
             <CommandItem
               onSelect={() => {
@@ -244,24 +253,6 @@ export function Dock() {
             >
               <Wrench className="mr-2 size-4" />
               ghost review
-            </CommandItem>
-            <CommandItem
-              onSelect={() => {
-                navigate("/tools/fleet");
-                setSearchOpen(false);
-              }}
-            >
-              <Wrench className="mr-2 size-4" />
-              ghost-fleet
-            </CommandItem>
-            <CommandItem
-              onSelect={() => {
-                navigate("/tools/ui");
-                setSearchOpen(false);
-              }}
-            >
-              <Wrench className="mr-2 size-4" />
-              ghost-ui
             </CommandItem>
           </CommandGroup>
         </CommandList>

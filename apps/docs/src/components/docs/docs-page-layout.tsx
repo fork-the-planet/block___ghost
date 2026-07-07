@@ -1,6 +1,6 @@
 "use client";
 
-import { cn } from "ghost-ui";
+import { cn } from "@design-intelligence/vessel";
 import type { ReactNode } from "react";
 
 /**

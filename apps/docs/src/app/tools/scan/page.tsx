@@ -1,6 +1,6 @@
 "use client";
 
-import { useStaggerReveal } from "ghost-ui";
+import { useStaggerReveal } from "@design-intelligence/vessel";
 import { BookOpen, FileText, Rocket } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
@@ -22,16 +22,15 @@ const cards: {
   },
   {
     name: "CLI reference",
-    href: "/docs/cli#ghost--fingerprint-layers-and-package-checks",
+    href: "/docs/cli",
     description:
-      "Check fingerprint contribution facets, validate packages, and emit context.",
+      "Emit the fingerprint menu with gather, read selected truths with pull, and tune with pulse.",
     icon: <BookOpen className="size-8" strokeWidth={1.5} />,
   },
   {
-    name: "Format spec",
-    href: "https://github.com/block/ghost/blob/main/docs/fingerprint-format.md",
-    description:
-      "The full package format for fingerprint intent, inventory, composition, and validation.",
+    name: "Authoring",
+    href: "/docs/fingerprint-authoring",
+    description: "How to write node prose that steers generation.",
     icon: <FileText className="size-8" strokeWidth={1.5} />,
   },
 ];
@@ -46,9 +45,9 @@ export default function GhostScanLanding() {
   return (
     <SectionWrapper>
       <AnimatedPageHeader
-        kicker="ghost scan"
-        title="Fingerprint Readiness"
-        description="The deterministic handoff that shows whether repo-local Ghost fingerprint facets are ready to guide generation and review."
+        kicker="ghost gather"
+        title="Context Before Building"
+        description="The deterministic handoff that emits the fingerprint menu — every truth's id, kind, and description — so your agent can select and pull the right context before it builds."
       />
 
       <div

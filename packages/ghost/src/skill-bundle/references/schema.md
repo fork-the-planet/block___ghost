@@ -1,55 +1,119 @@
-# Portable Fingerprint Package Schema Reference
+---
+name: schema
+description: The Ghost fingerprint package shape: flat nodes, derived concreteness, Skeletons, guards, probes, and checks.
+---
+
+# Ghost Fingerprint Package Reference
 
 Canonical package:
 
 ```text
 .ghost/
-  manifest.yml                  ghost.fingerprint-package/v1
-  intent.yml                    core surface intent
-  inventory.yml                 core material and source links
-  composition.yml               core patterns
-  validate.yml                  optional ghost.validate/v1 gates
+  manifest.yml        ghost.fingerprint-package/v1: schema + id
+  glossary.md         kind vocabulary + meanings + optional posture
+  materials/          bundled materials; never a node source
+  <kind>.<slug>.md    a brand truth of a declared kind
+  <slug>.md           a brand truth without a kind
+  checks/             optional review assertions; never a node source
 ```
 
-Git is the approval boundary: checked-in Ghost package facet files are
-canonical, and uncommitted or unmerged edits are draft work.
+Reserved at the root: `manifest.yml`, `glossary.md`, `materials/`, and
+`checks/`. Every other `*.md` is a node.
 
-The flat package is Ghost's default shape. Advanced repos may add
-`.ghost/relay.yml`, pass `ghost relay gather --config <file>`, or set
-`GHOST_RELAY_CONFIG=<relative-file>` to declare extra Relay context sources.
-Extra project files are Ghost-readable only when they are listed as Relay
-config sources; a schema name alone is not enough. OSS Ghost does not infer
-proprietary ontology from arbitrary YAML, and authored stack files are not Ghost
-Relay source-of-truth.
+## Glossary posture
 
-Relay configs choose the context-gathering base runtime. Omitted `base` means
-`base.kind: fingerprint`, which preserves the default `.ghost` fingerprint
-stack. Explicit `base.kind: none` lets a host framework gather declared request
-context without a `.ghost` package. In that mode, use `context.sections`,
-`context.extras`, source, gaps, and trace from `ghost.relay.gather/v2`; the
-top-level `selected_context` is intentionally sparse.
-
-`manifest.yml`:
+A kind may declare posture. Omitted posture defaults to `steady`.
 
 ```yaml
-schema: ghost.fingerprint-package/v1
-id: local
+kinds:
+  - name: principle
+  - name: anti-goal
+    posture: guard
+  - name: provocation
+    posture: wild
 ```
 
-Facet files are raw YAML. Ghost assembles them into an internal
-`ghost.fingerprint/v1` document.
+- `steady`: default, gathered normally.
+- `guard`: review-critical negative space. Stays in default gather, appears at
+  the tail of `ghost pull`, and is auto-offered by `ghost review` when its
+  materials match touched files.
+- `wild`: deliberate push beyond the fingerprint. Default gather excludes wild
+  kinds unless `--wild` is explicit.
 
-Use these typed refs:
+## Nodes
 
-- `intent.situation:<id>`
-- `intent.principle:<id>`
-- `intent.experience_contract:<id>`
-- `inventory.exemplar:<id>`
-- `composition.pattern:<id>`
-- `validate.check:<id>`
+A node is markdown with frontmatter and a prose body:
 
-`inventory.sources[].kind` may be `registry`, `file`, `url`, or `package`.
+```markdown
+---
+description: Logo lockups, clearspace, and when the glyph can stand alone.
+materials:
+  - brand/logo*.svg
+  - https://figma.com/file/example?node-id=logo-lockups
+---
 
-`validate.yml` remains deterministic only. Ref-backed
-checks are preferred; missing or unresolved derivation refs lint as warnings.
-Inventory refs can support a check but do not establish surface guidance alone.
+Use the full lockup when recognition matters.
+```
+
+- Identity is the filename minus `.md`.
+- Kind is the first dotted segment of the filename.
+- `description` is the retrieval payload shown by `ghost gather`.
+- `materials` accepts repo-relative paths/globs plus absolute HTTPS URLs. It is
+  a locator list, not guidance.
+
+Ghost derives whether a node carries concrete material from structure: non-empty
+`materials`, a fenced code block of at least 3 lines, or a `## Skeleton` section.
+This is reported in gather/pulse and used for pull ordering.
+
+## Skeleton convention
+
+A `## Skeleton` section contains the literal opening structure for a surface.
+It should contain exactly one fenced block; `ghost validate` warns, never fails,
+when a Skeleton section has zero or multiple fences.
+
+```markdown
+## Skeleton
+
+```tsx
+<section>
+  <h1>{status}</h1>
+  <button>{nextStep}</button>
+</section>
+```
+```
+
+`ghost pull` extracts Skeleton fences and emits them dead last under a banner
+instructing the agent to begin from that structure verbatim.
+
+## Checks
+
+Checks live under `.ghost/checks/*.md` and are never gathered or pulled:
+
+```markdown
+---
+name: logo-clearspace-holds
+description: Logo usage preserves clearspace and lockup integrity.
+severity: medium
+references:
+  - asset.logo
+probe: pnpm test:logo-clearspace
+---
+
+Grade whether the change preserves the logo guidance in `asset.logo`.
+```
+
+`references` are node ids with optional heading anchors. `probe` is optional: a
+repo-root shell command that `ghost review` runs for offered checks by default
+(timeout 30s; stdout/stderr truncated). Probe output is evidence only, never a
+Ghost pass/fail verdict. Use `ghost review --no-probes` to skip. Trust model:
+probes are the same class as npm scripts; Git review is the boundary.
+
+## Gather / Pull / Review
+
+- `ghost gather` emits the node menu, including coverage counts. Checks are
+  invisible.
+- `ghost pull` emits selected nodes in steering order and inlines small local
+  materials. Binary local materials become inspect-pointers.
+- `ghost review` matches diff files to local node materials, offers relevant
+  checks and matched guard nodes, embeds probe evidence, and emits a packet for
+  the host agent to judge.

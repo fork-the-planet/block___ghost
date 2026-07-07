@@ -1,74 +1,84 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { dirname, join, relative, resolve } from "node:path";
 import {
-  GHOST_VALIDATE_FILENAME,
-  type GhostFingerprintDocument,
+  classifyMaterialLocator,
+  closestIds,
+  expandLocalMaterialLocator,
+  extractSkeletonSections,
+  type GhostCatalog,
   type GhostFingerprintPackageManifest,
-  lintGhostValidate,
-  MAP_FILENAME,
-  SURVEY_FILENAME,
+  listBundledMaterialFiles,
+  materialLocatorClaimsPath,
+  parseGlossary,
+  parseSourceRef,
+  sliceNodeSection,
+  UsageError,
 } from "#ghost-core";
-import {
-  isExistingPathError,
-  isMissingPathError,
-  readOptionalUtf8,
-} from "../internal/fs.js";
+import { isExistingPathError, isMissingPathError } from "../internal/fs.js";
+import type { LoadedCheck } from "./check-files.js";
 import {
   FINGERPRINT_COMPOSITION_FILENAME,
-  FINGERPRINT_FILENAME,
   FINGERPRINT_INTENT_FILENAME,
   FINGERPRINT_INVENTORY_FILENAME,
   FINGERPRINT_MANIFEST_FILENAME,
   FINGERPRINT_PACKAGE_DIR,
-  FINGERPRINT_YML_FILENAME,
-  PATTERNS_FILENAME,
-  RESOURCES_FILENAME,
+  GHOST_GLOSSARY_FILENAME,
+  GHOST_MATERIALS_DIR,
 } from "./constants.js";
 import {
   lintFingerprintPackageManifest,
-  parseSplitFingerprintForLint,
-  templateChecks,
-  templateComposition,
-  templateIntent,
-  templateInventory,
-  templateManifest,
-} from "./fingerprint-package-layers.js";
+  loadFingerprintPackage,
+} from "./fingerprint-package-loader.js";
 import type { LintIssue, LintReport } from "./lint.js";
+import { resolveGitRoot } from "./package-paths.js";
+import {
+  DEFAULT_TEMPLATE_NAME,
+  getInitTemplate,
+  listInitTemplates,
+} from "./templates.js";
 
-export { loadFingerprintPackage } from "./fingerprint-package-layers.js";
+export { loadFingerprintPackage };
 
 export interface FingerprintPackagePaths {
   dir: string;
   packageDir: string;
   manifest: string;
+  glossary: string;
+  /** Legacy facet paths — used only to detect pre-flat-corpus packages. */
   intent: string;
   inventory: string;
   composition: string;
-  fingerprintYml: string;
-  resources: string;
-  map: string;
-  survey: string;
-  patterns: string;
-  /** Legacy direct markdown path; not part of the canonical root bundle. */
-  fingerprint: string;
-  checks: string;
 }
 
 export interface LoadedFingerprintPackage {
   manifest: GhostFingerprintPackageManifest;
   manifestRaw: string;
-  fingerprint: GhostFingerprintDocument;
-  layerRaw: {
-    intent?: string;
-    inventory?: string;
-    composition?: string;
-  };
+  /** The in-memory flat node catalog — the only fingerprint model. */
+  catalog: GhostCatalog;
+  /** Whether `.ghost/checks/` exists; `ghost review` requires it. */
+  hasChecksDir: boolean;
+  /** Checks from `.ghost/checks/`; never part of gather/pull. */
+  checks: Map<string, LoadedCheck>;
+  /**
+   * Nodes that failed per-node lint and were skipped while loading the catalog,
+   * each with its package-relative file path and first error message. Carried
+   * so `validate` can surface a malformed node instead of silently dropping it.
+   */
+  invalid: Array<{ file: string; message: string }>;
+  /** Check files that failed lint/loading. */
+  invalidChecks: Array<{ file: string; message: string }>;
 }
 
 export interface InitFingerprintPackageOptions {
-  reference?: string;
+  /** Init template name (default: "steering"). */
+  template?: string;
   force?: boolean;
+}
+
+export interface InitFingerprintPackageResult {
+  paths: FingerprintPackagePaths;
+  /** Package-relative paths of the files the template wrote. */
+  written: string[];
 }
 
 export function resolveFingerprintPackage(
@@ -81,16 +91,10 @@ export function resolveFingerprintPackage(
     dir,
     packageDir,
     manifest: join(packageDir, FINGERPRINT_MANIFEST_FILENAME),
+    glossary: join(packageDir, GHOST_GLOSSARY_FILENAME),
     intent: join(packageDir, FINGERPRINT_INTENT_FILENAME),
     inventory: join(packageDir, FINGERPRINT_INVENTORY_FILENAME),
     composition: join(packageDir, FINGERPRINT_COMPOSITION_FILENAME),
-    fingerprintYml: join(dir, FINGERPRINT_YML_FILENAME),
-    resources: join(dir, RESOURCES_FILENAME),
-    map: join(dir, MAP_FILENAME),
-    survey: join(dir, SURVEY_FILENAME),
-    patterns: join(dir, PATTERNS_FILENAME),
-    fingerprint: join(dir, FINGERPRINT_FILENAME),
-    checks: join(packageDir, GHOST_VALIDATE_FILENAME),
   };
 }
 
@@ -98,23 +102,37 @@ export async function initFingerprintPackage(
   dirArg: string | undefined,
   cwd = process.cwd(),
   options: InitFingerprintPackageOptions = {},
-): Promise<FingerprintPackagePaths> {
+): Promise<InitFingerprintPackageResult> {
+  const templateName = options.template ?? DEFAULT_TEMPLATE_NAME;
+  const template = getInitTemplate(templateName);
+  if (!template) {
+    throw new UsageError(
+      `Unknown init template '${templateName}'. Available: ${listInitTemplates().join(", ")}.`,
+    );
+  }
+
   const paths = resolveFingerprintPackage(dirArg, cwd);
   await mkdir(paths.packageDir, { recursive: true });
-  const files = [
-    { path: paths.manifest, content: templateManifest() },
-    { path: paths.intent, content: templateIntent() },
-    { path: paths.inventory, content: templateInventory(options.reference) },
-    { path: paths.composition, content: templateComposition() },
-    { path: paths.checks, content: templateChecks() },
-  ];
+
+  const files = template.files().map((file) => ({
+    relativePath: file.relativePath,
+    path: join(paths.packageDir, file.relativePath),
+    content: file.content,
+  }));
+
   if (!options.force) {
     await assertInitDoesNotOverwrite(files.map((file) => file.path));
   }
+
+  // Create any nested directories the template needs (e.g. nodes/).
+  const dirs = new Set(files.map((file) => dirname(file.path)));
+  await Promise.all([...dirs].map((dir) => mkdir(dir, { recursive: true })));
+
   await Promise.all(
     files.map((file) => writeInitFile(file.path, file.content, options.force)),
   );
-  return paths;
+
+  return { paths, written: files.map((file) => file.relativePath) };
 }
 
 async function writeInitFile(
@@ -129,7 +147,7 @@ async function writeInitFile(
     });
   } catch (err) {
     if (!force && isExistingPathError(err)) {
-      throw new Error(
+      throw new UsageError(
         `Refusing to overwrite existing Ghost fingerprint file:\n  ${path}\nPass --force to overwrite.`,
       );
     }
@@ -150,12 +168,17 @@ async function assertInitDoesNotOverwrite(paths: string[]): Promise<void> {
   }
   if (existing.length > 0) {
     const formatted = existing.map((path) => `  ${path}`).join("\n");
-    throw new Error(
+    throw new UsageError(
       `Refusing to overwrite existing Ghost fingerprint file(s):\n${formatted}\nPass --force to overwrite.`,
     );
   }
 }
 
+/**
+ * `validate` for a package: artifact shape, per-node validity, and the
+ * deterministic kind-prefix lint enabled by glossary.md. The catalog is flat;
+ * loading collects malformed nodes so they can be surfaced as structured issues.
+ */
 export async function lintFingerprintPackage(
   dirArg: string | undefined,
   cwd = process.cwd(),
@@ -168,29 +191,244 @@ export async function lintFingerprintPackage(
     "manifest.yml",
     issues,
   );
-  const intentRaw = await readOptional(paths.intent);
-  const inventoryRaw = await readOptional(paths.inventory);
-  const compositionRaw = await readOptional(paths.composition);
-  const checksRaw = await readOptional(paths.checks);
 
-  let fingerprint: GhostFingerprintDocument | undefined;
   if (manifestRaw !== undefined) {
+    // shape pass: manifest well-formed.
+    const beforeManifestErrors = issues.filter(
+      (issue) => issue.severity === "error",
+    ).length;
     lintFingerprintPackageManifest(manifestRaw, issues);
-    fingerprint = parseSplitFingerprintForLint(
-      { intentRaw, inventoryRaw, compositionRaw },
-      issues,
-    );
-  }
-
-  if (checksRaw !== undefined) {
-    const checks = parseYamlSafe(checksRaw, "validate.yml", issues);
-    if (checks !== undefined) {
-      const checksReport = lintGhostValidate(checks, { fingerprint });
-      issues.push(...prefixIssues("validate.yml", checksReport.issues));
+    const manifestHasErrors =
+      issues.filter((issue) => issue.severity === "error").length >
+      beforeManifestErrors;
+    if (manifestHasErrors) return finalize(issues);
+    // catalog pass: load + validate the node catalog.
+    try {
+      const { catalog, checks, invalid, invalidChecks } =
+        await loadFingerprintPackage(paths);
+      // node pass: a node that failed its own schema was skipped while loading
+      // the catalog; surface it here so a malformed node is loud, not silent.
+      issues.push(
+        ...invalid.map((entry) => ({
+          severity: "error" as const,
+          rule: "node-invalid",
+          message: entry.message,
+          path: entry.file,
+        })),
+      );
+      issues.push(
+        ...invalidChecks.map((entry) => ({
+          severity: "error" as const,
+          rule: "check-invalid",
+          message: entry.message,
+          path: entry.file,
+        })),
+      );
+      await lintGlossary(paths.glossary, issues);
+      await lintKindPrefixes(paths, catalog, issues);
+      lintSkeletonSections(catalog, issues);
+      await lintMaterialLocators(paths, catalog, issues, cwd);
+      lintCheckReferences(catalog, checks, issues);
+    } catch (err) {
+      issues.push({
+        severity: "error",
+        rule: "package-catalog-invalid",
+        message: err instanceof Error ? err.message : String(err),
+        path: ".ghost",
+      });
     }
   }
 
   return finalize(issues);
+}
+
+async function lintGlossary(
+  glossaryPath: string,
+  issues: LintIssue[],
+): Promise<void> {
+  let raw: string;
+  try {
+    raw = await readFile(glossaryPath, "utf-8");
+  } catch (err) {
+    if (isMissingPathError(err)) return;
+    throw err;
+  }
+
+  const result = parseGlossary(raw);
+  if (result.glossary !== null) return;
+  issues.push(
+    ...result.errors.map((message) => ({
+      severity: "error" as const,
+      rule: "glossary-invalid",
+      message,
+      path: GHOST_GLOSSARY_FILENAME,
+    })),
+  );
+}
+
+async function lintKindPrefixes(
+  paths: FingerprintPackagePaths,
+  catalog: GhostCatalog,
+  issues: LintIssue[],
+): Promise<void> {
+  const declaredKinds = await readDeclaredGlossaryKinds(paths.glossary);
+  if (declaredKinds === undefined) return;
+
+  const declared = new Set(declaredKinds);
+  for (const node of catalog.nodes.values()) {
+    if (node.kind === undefined || declared.has(node.kind)) continue;
+
+    const suggestions = closestIds(node.kind, declaredKinds, 1);
+    const suggestion = suggestions[0];
+    issues.push({
+      severity: "warning",
+      rule: "kind-undeclared",
+      message:
+        `Kind prefix \`${node.kind}\` is not declared in ${GHOST_GLOSSARY_FILENAME}.` +
+        (suggestion === undefined
+          ? " Drop the prefix if this node has no kind."
+          : ` Did you mean \`${suggestion}\`? Drop the prefix if this node has no kind.`),
+      path: `${node.id}.md`,
+    });
+  }
+}
+
+function lintSkeletonSections(
+  catalog: GhostCatalog,
+  issues: LintIssue[],
+): void {
+  for (const node of catalog.nodes.values()) {
+    const sections = extractSkeletonSections(node.body);
+    for (const section of sections) {
+      if (section.fences.length === 1) continue;
+      issues.push({
+        severity: "warning",
+        rule: "skeleton-fence-count",
+        message:
+          "## Skeleton section should contain exactly one fenced block; pull will emit all found skeleton fences",
+        path: `${node.id}.md`,
+      });
+    }
+  }
+}
+
+async function lintMaterialLocators(
+  paths: FingerprintPackagePaths,
+  catalog: GhostCatalog,
+  issues: LintIssue[],
+  cwd: string,
+): Promise<void> {
+  const repoRoot = await resolveGitRoot(cwd);
+  const options = {
+    repoRoot,
+    packageDir: paths.packageDir,
+    materialsDir: GHOST_MATERIALS_DIR,
+  };
+
+  const claimedLocators: string[] = [];
+  for (const node of catalog.nodes.values()) {
+    for (const locator of node.materials ?? []) {
+      if (classifyMaterialLocator(locator).kind === "url") continue;
+      claimedLocators.push(locator);
+      const expanded = await expandLocalMaterialLocator(locator, options, {
+        cap: Number.POSITIVE_INFINITY,
+      });
+      if (expanded.matches.length > 0) continue;
+      issues.push({
+        severity: "warning",
+        rule: "material-locator-dead",
+        message: `material locator '${locator}' matches no local files`,
+        path: `${node.id}.md.materials`,
+      });
+    }
+  }
+
+  const bundledFiles = await listBundledMaterialFiles(options);
+  for (const file of bundledFiles) {
+    const claimed = claimedLocators.some((locator) =>
+      materialLocatorClaimsPath(locator, file, options),
+    );
+    if (claimed) continue;
+    issues.push({
+      severity: "warning",
+      rule: "material-orphaned",
+      message:
+        "bundled material is not claimed by any node `materials` locator",
+      path: toPackageRelative(file, repoRoot, paths.packageDir),
+    });
+  }
+}
+
+function toPackageRelative(
+  repoRelativePath: string,
+  repoRoot: string,
+  packageDir: string,
+): string {
+  const packageRelative = relative(
+    packageDir,
+    resolve(repoRoot, repoRelativePath),
+  )
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  return packageRelative.startsWith("../") ? repoRelativePath : packageRelative;
+}
+
+function lintCheckReferences(
+  catalog: GhostCatalog,
+  checks: Map<string, LoadedCheck>,
+  issues: LintIssue[],
+): void {
+  for (const check of checks.values()) {
+    for (const raw of check.references) {
+      const parsed = parseSourceRef(raw);
+      if (parsed === null) {
+        issues.push({
+          severity: "error",
+          rule: "check-reference-malformed",
+          message: `check reference '${raw}' is not a node id with optional '> Heading' anchor`,
+          path: `checks/${check.id}.md.references`,
+        });
+        continue;
+      }
+      const node = catalog.nodes.get(parsed.nodeId);
+      if (node === undefined) {
+        issues.push({
+          severity: "warning",
+          rule: "check-reference-unresolved",
+          message: `check reference '${raw}' does not resolve to a fingerprint node`,
+          path: `checks/${check.id}.md.references`,
+        });
+        continue;
+      }
+      if (
+        parsed.heading !== undefined &&
+        sliceNodeSection(node.body, parsed.heading) === null
+      ) {
+        issues.push({
+          severity: "warning",
+          rule: "check-reference-heading-missing",
+          message: `check reference '${raw}' names a heading that was not found`,
+          path: `checks/${check.id}.md.references`,
+        });
+      }
+    }
+  }
+}
+
+async function readDeclaredGlossaryKinds(
+  glossaryPath: string,
+): Promise<string[] | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(glossaryPath, "utf-8");
+  } catch (err) {
+    if (isMissingPathError(err)) return undefined;
+    throw err;
+  }
+
+  const result = parseGlossary(raw);
+  if (result.glossary === null) return [];
+  return result.glossary.frontmatter.kinds.map((kind) => kind.name);
 }
 
 async function readRequired(
@@ -209,45 +447,6 @@ async function readRequired(
     });
     return undefined;
   }
-}
-
-const readOptional = readOptionalUtf8;
-
-function parseYamlSafe(
-  raw: string,
-  label: string,
-  issues: LintIssue[],
-): unknown | undefined {
-  try {
-    return parseYaml(raw);
-  } catch (err) {
-    issues.push({
-      severity: "error",
-      rule: "package-yaml-invalid",
-      message: `${label} is not valid YAML: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-      path: label,
-    });
-    return undefined;
-  }
-}
-
-function prefixIssues(
-  label: string,
-  input: Array<{
-    severity: "error" | "warning" | "info";
-    rule: string;
-    message: string;
-    path?: string;
-  }>,
-): LintIssue[] {
-  return input.map((issue) => ({
-    severity: issue.severity,
-    rule: issue.rule,
-    message: issue.message,
-    path: issue.path ? `${label}.${issue.path}` : label,
-  }));
 }
 
 function finalize(issues: LintIssue[]): LintReport {

@@ -52,7 +52,7 @@ try {
 
   run("node", ["scripts/pack-release-tarball.mjs", packDir]);
 
-  const expectedName = `anarchitecture-ghost-${PACKAGE_JSON.version}.tgz`;
+  const expectedName = `design-intelligence-ghost-${PACKAGE_JSON.version}.tgz`;
   const tarballPath = resolve(packDir, expectedName);
   if (!existsSync(tarballPath)) {
     fail(`expected release tarball at ${tarballPath}`);
@@ -66,10 +66,6 @@ try {
     "dist/bin.js",
     "dist/cli.js",
     "node_modules/cac",
-    "node_modules/fdir",
-    "node_modules/jiti",
-    "node_modules/picomatch",
-    "node_modules/tinyglobby",
     "node_modules/yaml",
     "node_modules/zod",
   ];
@@ -78,6 +74,18 @@ try {
     if (!existsSync(fullPath)) {
       fail(`release tarball is missing ${relativePath}`);
     }
+  }
+
+  const packedPkg = JSON.parse(
+    readFileSync(join(packageDir, "package.json"), "utf8"),
+  );
+  if (
+    packedPkg.bin?.ghost !== "./dist/bin.js" ||
+    packedPkg.bin?.["ghost-fingerprint"] !== "./dist/bin.js"
+  ) {
+    fail(
+      "release tarball package.json must expose both ghost and ghost-fingerprint bins pointing at ./dist/bin.js",
+    );
   }
 
   const help = run("node", [join(packageDir, "dist", "bin.js"), "--help"], {
@@ -93,8 +101,14 @@ try {
     { cwd: tmpRoot },
   );
   const initOutput = JSON.parse(init);
-  if (!initOutput.manifest?.endsWith(".ghost/manifest.yml")) {
-    fail("release tarball ghost init did not emit the expected manifest path");
+  if (
+    !initOutput.dir?.endsWith(".ghost") ||
+    !Array.isArray(initOutput.written) ||
+    !initOutput.written.includes("manifest.yml")
+  ) {
+    fail(
+      "release tarball ghost init did not scaffold the expected node package",
+    );
   }
 
   const topLevelEntries = readdirSync(extractDir);

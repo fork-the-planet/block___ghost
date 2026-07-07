@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 const ROOTS = [
   "README.md",
   "CLAUDE.md",
+  "CONTRIBUTING.md",
   "package.json",
   "docs",
   "apps",
@@ -12,7 +13,7 @@ const ROOTS = [
   "packages/ghost/package.json",
   "packages/ghost/src",
   "packages/ghost/test",
-  "packages/ghost-ui/README.md",
+  "packages/vessel/README.md",
   ".ghost",
   ".changeset",
 ];

@@ -1,44 +1,49 @@
 ---
 name: brief
-description: Build a concise pre-generation brief from Relay JSON context.
+description: Build a compact pre-generation packet from pulled Ghost truths.
 ---
 
 # Recipe: Brief Work From Ghost Fingerprint
 
-1. Run `ghost relay gather <target> --format json` when a target path is known.
-2. For prompt-shaped work with no clear path, turn the ask into a `ghost.relay-request/v1` and run `ghost relay gather --request-stdin --format json`.
-3. If the host framework stores Relay config outside `.ghost/relay.yml`, pass `ghost relay gather --config <file>` or set `GHOST_RELAY_CONFIG=<relative-file>`.
-4. Treat the full `ghost.relay.gather/v2` JSON result as the agent contract.
-5. Read `context`, `selected_context`, `targetPaths`, `source`, `stackDirs`, gaps, and trace fields from JSON.
-6. Start from the Relay stack, selected intent, and active obligations when `context.config.base.kind` is `fingerprint`.
-7. Use request-selected `context.sections` and `context.extras` directly when `context.config.base.kind` is `none`.
-8. Express that intent through selected composition.
-9. Inspect matching `inventory.exemplars` as concrete generation anchors.
-10. Run `ghost signals <path>` when raw repo observations would help you find evidence.
-11. Skim active checks so generation avoids deterministic failures.
-12. Treat Relay gaps as prompts to inspect full facet files or label local reasoning provisional.
+A brief is an ephemeral steering packet for the generating pass. It is not a new
+schema and is never written back into `.ghost/`.
 
-Plain `ghost relay gather <target>` is a compact human preview. Do not scrape
-that markdown as the primary agent interface; projected Relay config sources may
-only be present in JSON.
+1. Run `ghost gather <ask> --format json` and select against descriptions.
+2. Pull a small set: **3–5 nodes is normal; 10 is a bad selection** unless the
+   task is unusually broad. Always include `index` unless already read this
+   session.
+3. Prefer concrete nodes: `materials`, substantial fenced examples, or a
+   `## Skeleton`. If there is **no concrete material for this surface**, the
+   readiness ceiling is **Yellow**.
+4. Keep provisional reasoning visibly separate from Ghost-backed claims.
 
-The host agent owns natural-language extraction into request selectors such as
-customer, brand, system, moment, medium, and capability. Ghost resolves those
-selectors deterministically from declared Relay config resolvers.
+## The packet: five sections only
 
-`base.kind: none` means Relay is intentionally not loading a `.ghost`
-fingerprint package. Expect `selected_context` to be sparse and read declared
-request context from `context.sections`, `context.extras`, source, gaps, and
-trace.
+Return this shape:
 
-`ghost.relay-context/v1` includes section items, source paths, skipped context,
-gaps, and selection trace. Extra project files only count as Ghost context when
-they are declared as Relay config sources.
+```markdown
+## Grounded in
+- `node.id` — why it was selected
 
-Return a short human-facing brief synthesized from JSON: relevant fingerprint
-refs, product obligations, inventory exemplars and building blocks to inspect,
-active checks to avoid, local evidence, and provisional assumptions when facets
-are silent.
+## Non-negotiables
+- ≤5 lines, each cited to a node id
 
-Fingerprint edits are ordinary Git-reviewed edits to the split fingerprint
-package.
+## Materials inline
+- concrete locators, inlined snippets, inspect-pointers, and what to view/use
+
+## Skeleton
+- matching pulled Skeleton, or "none pulled"
+
+## Silent / provisional
+- what Ghost does not cover and what local evidence carries
+```
+
+Rules:
+
+- Do not add sections for every kind. Sections dilute instruction weight.
+- Treat `ghost pull` ordering as signal: stance first, concrete material next,
+  prose rules, guards late, Skeletons dead last.
+- If a pulled Skeleton matches the surface, begin the artifact from it verbatim
+  before filling.
+- Guards (`posture: guard`) are review-critical anti-goals: state the positive
+  replacement, not just the rejected pattern.

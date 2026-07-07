@@ -1,6 +1,6 @@
 ---
 title: CLI Reference
-description: Commands around the portable fingerprint lifecycle. Your agent handles the composition work.
+description: The deterministic commands around the flat fingerprint lifecycle. Your agent does the reading, writing, and interpreting.
 kicker: Docs
 section: guide
 order: 30
@@ -9,198 +9,238 @@ slug: cli
 
 <DocSection title="Overview">
 
-The CLI does the repeatable parts around the fingerprint lifecycle: create
-packages, report contribution state, validate files, gather optional source material,
-emit handoff packets, govern diffs, compare packages, and record intent. Your
-agent does the reading, writing, and reviewing.
+The CLI does the repeatable parts around the fingerprint lifecycle: scaffold a
+package, validate it, and emit the menu of brand truths. Your agent does the
+interpretation.
 
-`ghost --help` intentionally shows the short core workflow for new adopters.
-Run `ghost --help --all` for the complete command index; command-specific help
-remains available with `ghost <command> --help`.
+`ghost --help` shows the short core workflow. `ghost --help --all` shows the
+complete command index, and `ghost <command> --help` shows flags for one
+command.
 
-Canonical Ghost fingerprints start here, with optional child packages for scoped
-product areas:
+The canonical fingerprint is a `.ghost/` directory: a flat set of prose nodes.
 
 ```text
-.ghost/manifest.yml
-.ghost/intent.yml
-.ghost/inventory.yml
-.ghost/composition.yml
-.ghost/validate.yml
-apps/checkout/.ghost/manifest.yml
+.ghost/
+  manifest.yml        # schema + id
+  glossary.md         # the kind vocabulary + what each kind means
+  <kind>.<slug>.md    # a brand truth of a declared kind (principle.density.md)
+  <slug>.md           # a brand truth without a kind (voice.md)
+  checks/             # optional review assertions; never nodes
 ```
 
 The command tables below are generated from the CLI source. Run
 `pnpm dump:cli-help` after command or flag changes.
 
+#### Exit codes
+
+Every command follows one contract, so an agent can branch on the exit code:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success. |
+| `1` | The command ran but the result is unhappy: `validate` found issues, or an unexpected error was thrown. |
+| `2` | The command was called wrong: a bad flag or argument, a missing package for a command that needs one (`gather`), a `pull` with no known ids, or `review` without a checks directory. |
+| `3` | A command-specific refusal, currently only `skill install` when a skill is already present (pass `--force`). |
+
+A missing package is reported, not treated as a crash: `validate` records it as
+a finding (exit `1`).
+
 </DocSection>
 
 <DocSection title="Create And Inspect">
 
-### Initialize - `init`
+### Initialize: `init`
 
-Create a `.ghost/` package with a manifest, raw facet files,
-and deterministic checks. Use `--scope <path>` for nested package roots. Use
-`--monorepo` to create or preserve the root package, detect workspace child
-roots, and print scoped init commands; add `--apply` to create the detected
-child packages. Use
-`GHOST_PACKAGE_DIR=<relative-dir>` only when a host wrapper stores Ghost package
-roots under a different safe relative directory; raw `ghost` defaults to
-`.ghost`. Exact `--package <dir>` values win over the environment default.
+Scaffold a `.ghost/` package with the steering starter: a manifest, a starter `glossary.md`, a core `index.md` node, and demo nodes for stance, composition, anti-goals, patterns, exemplars, materials, and decisions. The demo content is there for inspiration and guidance. Replace it with real product truth before using it to steer generation. Use `--template minimal` when you only want the small manifest/glossary/index starter. Add truths by adding files (`principle.density.md`). Use
+`--package <dir>` for an exact directory, or set `GHOST_PACKAGE_DIR` when a host
+wrapper stores Ghost files outside the default `.ghost`. Core `init` scaffolds
+the fingerprint only; pass `--with checks` to also add the checks directory in
+one move.
 
 <CliHelp tool="ghost" command="init" hideDescription />
 
 ```bash
 ghost init
-ghost init --monorepo
-ghost init --monorepo --apply
-ghost init --scope apps/checkout
-ghost init --package product-surface
-ghost init --package .design/custom-ghost
+ghost init --template minimal
+ghost init --with checks
+ghost init --package product-fingerprint
 GHOST_PACKAGE_DIR=.agents/ghost ghost init
-GHOST_PACKAGE_DIR=.design/memory ghost init --scope apps/checkout
 ```
 
-### Contribution facets - `scan`
+### Manage checks: `checks`
 
-Report whether `manifest.yml` is present and which sparse facets
-this package contributes: `intent`, `inventory`, `composition`, and `validate`.
-Raw repo signals do not count toward inventory contribution.
+**Checks** are optional review assertions in a flat `.ghost/checks/`
+directory. They are feed-back only — they never leak into generation context,
+and they are never emitted by `gather` or `pull`. They are consumed by
+`ghost review`.
 
-<CliHelp tool="ghost" command="scan" hideDescription />
+<CliHelp tool="ghost" command="checks" hideDescription />
 
 ```bash
-ghost scan
-ghost scan --format json
-GHOST_PACKAGE_DIR=.agents/ghost ghost scan --format json
-GHOST_PACKAGE_DIR=.design/memory ghost scan --include-nested --format json
+ghost checks init
 ```
 
-### Stack inspection - `stack`
+To remove checks, delete the `.ghost/checks/` directory; like every
+fingerprint edit, ordinary Git review is the approval boundary.
 
-Inspect the root-to-leaf fingerprint stack for one or more paths.
+</DocSection>
 
-<CliHelp tool="ghost" command="stack" hideDescription />
+<DocSection title="Validate">
+
+### Validation: `validate`
+
+Validate the package: artifact shape, per-node validity, material locators,
+check references, and that each node's kind prefix is
+declared in `glossary.md`. An undeclared prefix is a warning with a "did you
+mean" suggestion, not a failure. Defaults to `.ghost`; pass a file to validate
+a single node or check.
+
+<CliHelp tool="ghost" command="validate" hideDescription />
 
 ```bash
-ghost stack apps/checkout/review/page.tsx --format json
-```
-
-### Inspect repo signals - `signals`
-
-Emit raw signals about a frontend repo as JSON. Use this as scratch evidence
-while authoring curated fingerprint facets.
-
-<CliHelp tool="ghost" command="signals" hideDescription />
-
-```bash
-ghost signals .
+ghost validate
+ghost validate .ghost/principle.trust.md
+ghost validate --format json
 ```
 
 </DocSection>
 
-<DocSection title="Validate And Emit">
+<DocSection title="Gather Context">
 
-### Validation - `lint`
+### Emit the menu: `gather`
 
-Validate a root `.ghost` fingerprint package or an individual split artifact.
-`--all` validates every nested package and merged stack.
+`gather` emits the **menu**: every node's id, kind, and description. It does no
+selection — the agent reads the ask against the menu and pulls the truths it
+judges relevant. There is no slice, no anchor, and no inheritance between nodes;
+the package is flat.
 
-<CliHelp tool="ghost" command="lint" hideDescription />
-
-```bash
-ghost lint
-ghost lint .ghost/intent.yml
-ghost lint .ghost/validate.yml --format json
-ghost lint --all
-```
-
-### Package fidelity - `verify`
-
-Validate fingerprint evidence and exemplar paths, typed check refs, and
-optional rationale files.
-
-<CliHelp tool="ghost" command="verify" hideDescription />
+<CliHelp tool="ghost" command="gather" hideDescription />
 
 ```bash
-ghost verify .ghost --root .
-GHOST_PACKAGE_DIR=.design/memory ghost verify --all
+ghost gather "checkout confirmation email"
+ghost gather "checkout confirmation email" --format json
 ```
 
-### Reusable Review Command - `emit`
+This is the pre-generation step, and "the right context at the right time": the
+agent selects just-in-time against the actual task, then manifests the truths
+into whatever it is building — product UI, marketing, email, a landing page.
 
-Emit `review-command` from split fingerprint facets when a host wants a
-reusable review prompt.
+### Read the selected truths: `pull`
 
-<CliHelp tool="ghost" command="emit" hideDescription />
+`pull` emits the named nodes' full prose bodies. It is how an agent reads the
+truths it selected from the menu — preferred over opening the files directly,
+because gather and pull append structured JSONL events to `.ghost/.events`.
 
-### Agent Context - `relay gather`
+That file is an events tape for the fingerprint's author: tweak a node's
+description, re-run the task, and `ghost pulse` shows whether the truth appeared
+on the menu, got pulled, was missed by name, or stayed cold. It is a dotfile
+(never a node), gitignored by the scaffold, and safe to delete at any time. The
+events tape is local tuning signal, not canonical fingerprint state.
 
-Gather Relay context for a target path or structured Relay request. Relay loads
-config first; omitted `base` means `base.kind: fingerprint`, while
-`base.kind: none` lets agent-framework repos gather declared request context
-without a `.ghost` package. For agents and host adapters, use JSON: the full
-`ghost.relay.gather/v2` result is the stable contract, and its nested `context`
-is `ghost.relay-context/v1`. Plain markdown output remains a compact human
-preview.
-
-<CliHelp tool="ghost" command="relay" hideDescription />
+<CliHelp tool="ghost" command="pull" hideDescription />
 
 ```bash
-ghost relay gather apps/checkout/review/page.tsx --format json
-ghost relay gather apps/checkout/review/page.tsx --package product-surface --format json
-ghost relay gather apps/checkout/review/page.tsx --config .ghost/relay.yml --format json
-GHOST_RELAY_CONFIG=.agents/ghost/relay.yml ghost relay gather --request-stdin --format json
-ghost relay gather stacks/portal.renewal-reminder.email.yml --config .agents/ghost/relay.yml --format json
-ghost relay gather --request request.yml --format json
-ghost relay gather --request-stdin --format json
-ghost relay gather apps/checkout/review/page.tsx # human preview
+ghost pull principle.trust voice
+ghost pull principle.trust --format json
+ghost pull voice --no-events
 ```
 
-### Inspection - `describe`
+### Read the local signal: `pulse`
 
-Print a markdown section map.
+`pulse` summarizes the events tape: gathers, pulls, abandoned gathers,
+exposure-normalized hit rates, cold nodes, and unknown ids the agent tried to
+pull.
 
-<CliHelp tool="ghost" command="describe" hideDescription />
+<CliHelp tool="ghost" command="pulse" hideDescription />
 
-### Survey/cache ops - `survey <op>`
+```bash
+ghost pulse
+ghost pulse --format json
+```
 
-Operate on `ghost.survey/v1` files as compatibility cache source material.
-
-<CliHelp tool="ghost" command="survey" hideDescription />
+A mixed pull partially succeeds: known ids are emitted, unknown ids warn with closest-id hints, and misses are recorded for `pulse`. A pull with no known ids exits `2` after recording the miss.
 
 </DocSection>
 
-<DocSection title="Govern And Compare">
+<DocSection title="Review A Diff">
 
-### Deterministic gates - `check`
+### Assemble a review packet: `review`
 
-Run active `ghost.validate/v1` gates against a git diff. Without `--package`,
-Ghost groups changed files by resolved fingerprint stack and runs merged checks
-per group.
+Where `gather` and `pull` are feed-forward, `review` is feed-back. It reads a
+diff, matches touched files to node `materials` (repo-relative locators only),
+offers the relevant checks, and emits an **advisory packet** for the host agent
+to weigh. The command grades nothing; the agent renders findings.
 
-<CliHelp tool="ghost" command="check" hideDescription />
-
-### Advisory governance packet - `review`
-
-Emit an evidence-routed advisory review packet grounded in selected context,
-validation checks, and the diff.
+`review` requires the checks directory (`ghost checks init`). Without it, the
+command exits `2` with a pointer to add it. For the authoring model behind
+checks — how to write them and how routing works — see
+[Checks And Review](/docs/checks-and-review).
 
 <CliHelp tool="ghost" command="review" hideDescription />
 
-### Comparison - `compare`
+```bash
+ghost review                    # diff the worktree against HEAD
+ghost review --base main        # diff against another ref
+git diff main | ghost review --diff=-   # read a diff from stdin
+ghost review --format json      # raw JSON packet for host tooling
+```
 
-Pairwise distance or composite analysis over fingerprint packages.
+The packet contains:
 
-<CliHelp tool="ghost" command="compare" hideDescription />
+- **Touched files** parsed from the diff.
+- **Matched material-backed nodes**: every node whose `materials` locators match
+  a touched file, with its full prose and which locators matched.
+- **Offered checks**: checks whose `references` point at a matched node
+  (`matched`), plus checks that reference no material-backed node at all and are
+  therefore always offered (`always`). Each check carries its prose and the
+  referenced nodes' baseline prose.
+- **Coverage gaps**: touched files no node's materials claim, and material-backed
+  nodes no check guards — signals for tuning the fingerprint, not failures.
 
-### Drift stance - `ack` / `track` / `diverge`
+Each check is one markdown file under `.ghost/checks/`:
 
-Record how the repo should treat tracked fingerprint drift. These compatibility
-governance verbs still operate on tracked direct fingerprint markdown files.
+```markdown
+---
+name: logo-clearspace-holds
+description: Logo usage preserves clearspace, lockup integrity, and glyph rules.
+severity: medium
+references:
+  - asset.logo
+---
 
-<CliHelp tool="ghost" command="ack" hideDescription />
-<CliHelp tool="ghost" command="track" hideDescription />
-<CliHelp tool="ghost" command="diverge" hideDescription />
+Grade whether the change preserves the logo guidance in `asset.logo`.
+```
+
+`references` binds the check to fingerprint node ids, optionally scoped to one
+section with a heading anchor (`asset.logo > Clearspace`); `validate` verifies
+every reference resolves. `severity` is one of `high`, `medium`, or `low` —
+advice for the reviewing agent, not an enforcement level.
+
+</DocSection>
+
+<DocSection title="Skill And Inspection">
+
+### Install the skill: `skill`
+
+Install the Ghost skill bundle so a host agent knows how to author and use the
+fingerprint.
+
+<CliHelp tool="ghost" command="skill" hideDescription />
+
+```bash
+ghost skill install
+ghost skill install --agent claude
+ghost skill install --dest ~/.codex/skills/ghost
+```
+
+### Command manifest: `manifest`
+
+Emit a self-describing JSON manifest of every command and flag.
+
+<CliHelp tool="ghost" command="manifest" hideDescription />
+
+```bash
+ghost manifest --format json
+```
 
 </DocSection>

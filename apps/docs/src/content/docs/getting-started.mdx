@@ -1,35 +1,195 @@
 ---
 title: Getting Started
-description: Install Ghost, author a product-surface composition fingerprint, and use it to generate, validate, compare, and govern product surfaces.
+description: Install Ghost, author a brand fingerprint as a flat set of prose truths, and gather the right context before your agent builds.
 kicker: Docs
 section: guide
 order: 10
 slug: getting-started
 ---
 
-<DocSection title="The Simple Model">
+<DocSection title="What Ghost Does">
 
-Ghost captures the composition of a product surface: the intent behind it, the
-materials it draws from, and the patterns that make it feel intentional. The
-public package is `@anarchitecture/ghost`, and it installs one CLI: `ghost`.
+<Callout variant="info" title="Just want a first win?">
 
-The canonical portable fingerprint is a folder:
+Start with [Five-Minute Ghost](/docs/quickstart) — one file, one repeated
+decision, no vocabulary. This guide is the full loop for when you're ready to
+author a glossary and gather context end to end.
+
+</Callout>
+
+Ghost is your brand as a **portable steering packet**: its truths, its stance,
+its conditions, written as prose your agent reads **before** it makes anything.
+A truth is stated once, at the altitude it is actually true, and the agent
+manifests it into whatever it is making — a screen, an email, a landing page, a
+sentence. The packet is agent-agnostic and travels with the repo. The public
+package is `@design-intelligence/ghost`, and it installs one CLI: `ghost`.
+
+The core loop is **feed-forward**: it grounds generation before your agent
+builds. An optional feed-back side — the checks directory and `ghost review` —
+assembles advisory review packets after, but never grades output itself. You
+work through a short loop:
+
+```bash
+ghost init        # scaffold .ghost/ with the steering starter
+ghost validate    # artifact shape + node validity + kind-prefix check
+ghost gather <ask> # emit the menu for this task; your agent selects the truths it needs
+ghost pull <ids>   # read the selected truths' full bodies
+ghost pulse        # inspect the local signal while tuning the fingerprint
+```
+
+When you want review assertions too, opt in with `ghost checks init` and
+run `ghost review` against a diff — [Checks And Review](/docs/checks-and-review)
+covers that side of the loop.
+
+The CLI does the deterministic work; your agent does the interpretation. The
+rest of this guide walks the loop; the **How It Works** section at the end
+covers the data model underneath it.
+
+</DocSection>
+
+<DocSection title="Install Ghost">
+
+```bash
+npm install -D @design-intelligence/ghost
+npx ghost --help
+npx ghost --help --all
+npx ghost skill install
+```
+
+`ghost --help` shows the core new-adopter workflow. Use `ghost --help --all`
+when you want the complete command index.
+
+Once the skill is installed, ask your agent in plain English:
+
+```text
+Set up the Ghost fingerprint for this repo.
+Brief this work from the Ghost fingerprint.
+```
+
+The skill tells the agent what to read, what to write, and how to gather.
+
+</DocSection>
+
+<DocSection title="Author Your First Fingerprint">
+
+Start with one truth, not the whole brand. The hardest part is picking the first
+one, so pick the decision whose review feedback you keep repeating — the checkout
+you always flag for trust, the voice you always re-tone, the empty state you
+always rewrite. Write that one down as a node, and grow the fingerprint decision
+by decision. One high-confidence truth beats an empty catalog.
+
+The CLI handles the deterministic package work. Your agent handles the authoring:
+interviewing you, working with the material you show it, drafting node prose,
+and asking you to curate the claims. `ghost init` scaffolds the steering starter: `manifest.yml`, a starter `glossary.md`, a core `index.md` node, and demo nodes for stance, composition, anti-goals, patterns, exemplars, materials, and decisions. The demo content is there for inspiration and guidance. Replace its claims, paths, examples, and decisions with your real product truth before using it to steer generation. Use `ghost init --template minimal` when you only want the small manifest/glossary/index starter.
+
+```bash
+ghost init
+ghost validate
+```
+
+Each node's prose records a durable brand truth. While drafting, ask three
+questions of every truth: **why** (the stance — what this brand is, who it
+serves, what must remain true), **with what** (the materials — building blocks,
+files, assets, and source links agents may inspect or use), and **how it is
+assembled** (the patterns that make it intentional — hierarchy, density,
+restraint, repetition, trust, and flow).
+
+These are drafting prompts, never frontmatter fields. Node frontmatter carries
+only `description` plus free-form passthrough
+keys. A node's **kind** comes from its filename prefix (`principle.density.md` →
+kind `principle`), and the kinds are declared in `glossary.md`. When a truth is
+narrower than universal, state its **condition** in the prose — the situation it
+applies in, never a filename destination. For a fuller human-agent workflow, read
+[Fingerprint Authoring](/docs/fingerprint-authoring).
+
+</DocSection>
+
+<DocSection title="Gather Context Before You Build">
+
+Before generating, gather the fingerprint menu. `gather` does no selection — it
+emits every node's id, kind, and description, and your agent reads the ask
+against it and pulls the truths it judges relevant:
+
+```bash
+ghost gather "checkout settings"
+ghost gather "checkout settings" --format json
+ghost pull principle.trust voice   # read the selected truths' full bodies
+```
+
+This is "the right context at the right time": the agent selects just-in-time
+against the actual task, then manifests the truths into whatever it is building.
+Run it before generation, so the agent builds with the brand in hand rather than
+discovering the gaps in review.
+
+Each `gather` and `pull` also appends a structured JSONL event to
+`.ghost/.events`, a gitignored events tape. That one is for you: tweak a node's
+description, re-run the task, and `ghost pulse` shows whether the truth appeared
+on the menu, got pulled, was missed by name, or stayed cold.
+
+```bash
+ghost pulse
+```
+
+Read `pulse` as a tuning signal, not a score. A cold node may need a sharper
+`description`; a repeated miss may mean the id or glossary vocabulary is not
+what agents expect; an abandoned gather means the menu did not lead to a useful
+selection. The events tape is local tuning signal, not canonical fingerprint state.
+
+</DocSection>
+
+<DocSection title="Validate">
+
+`ghost validate` checks the package deterministically: artifact shape, per-node
+validity, and that each node's kind prefix is declared in the glossary.
+
+```bash
+ghost validate
+ghost validate --format json
+```
+
+An undeclared kind prefix is a warning with a "did you mean" suggestion, not a
+failure. Treat fingerprint edits as ordinary Git-reviewed changes: uncommitted
+edits are drafts; checked-in nodes are canonical.
+
+</DocSection>
+
+<DocSection title="How It Works (the model underneath)">
+
+You can run the whole loop above without this section — your agent handles the
+format. Read on when you want to understand how the folder of files is wired.
+
+The fingerprint is a **flat set of prose nodes**:
 
 ```text
 .ghost/
-  manifest.yml
-  intent.yml
-  inventory.yml
-  composition.yml
-  validate.yml
+  manifest.yml          # schema + package id
+  glossary.md           # the kind vocabulary + what each kind means
+  index.md              # the curated front door node
+  principle.trust.md    # a brand truth of kind `principle`
+  condition.density.md  # a brand truth of kind `condition`
+  asset.logo.md         # a truth that may point at concrete materials
+  voice.md              # a brand truth without a kind
+  checks/               # optional review assertions; never a node
 ```
 
-Generation starts from `intent.yml`, `inventory.yml`, and `composition.yml`.
-`validate.yml` checks validate the result afterward; they are not generation input.
+There is no hierarchy, no inheritance, and no edges between nodes. A node's
+identity is its file path with `.md` dropped (`marketing.email.md` is the node
+`marketing.email`). Its **kind** is the filename's first dotted segment, and must
+be a kind declared in `glossary.md`; a bare name (`voice.md`) has
+no kind. Folders are a human-browsing convenience only — the model reads a
+flat menu.
 
-Nested product areas can add child package roots such as
-`apps/checkout/.ghost/`. Ghost resolves fingerprint stacks
-root-to-leaf for the file or diff being reviewed.
+Altitude lives in the prose: a universal truth is stated plainly; a narrower
+truth names the *situation* it applies in. The agent reads the condition and
+decides when the truth applies. Reserved at the package root: `manifest.yml`,
+`glossary.md`, and `checks/`; every other `*.md` is a node.
+
+A node may carry `materials`: repo-relative paths/globs or HTTPS
+URLs for the concrete materials the prose governs. `ghost gather` emits the menu;
+the agent selects and manifests. Checks are used by `ghost review`, never by
+generation.
+
+One contract per package: a repo's `.ghost/` is the whole fingerprint.
 
 </DocSection>
 
@@ -47,123 +207,5 @@ Ghost today, expect some churn, pin the version you depend on, and review
 release notes before upgrading.
 
 </Callout>
-
-</DocSection>
-
-<DocSection title="Install Ghost">
-
-```bash
-npm install -D @anarchitecture/ghost
-npx ghost --help
-npx ghost --help --all
-npx ghost skill install
-```
-
-`ghost --help` shows the core new-adopter workflow. Use `ghost --help --all`
-when you want the complete command index.
-
-Once the skill is installed, ask your agent in plain English:
-
-```text
-Set up the Ghost fingerprint for this repo.
-Brief this work from the Ghost fingerprint.
-Review this PR against the Ghost fingerprint.
-```
-
-The skill tells the agent what to read, what to write, and which CLI checks to
-run.
-
-</DocSection>
-
-<DocSection title="Author Your First Fingerprint">
-
-The CLI handles the deterministic package work. Your agent handles the
-composition work: interviewing, reading repo evidence, drafting facet edits, and
-asking you to curate the claims.
-
-```bash
-ghost init
-ghost scan --format json
-ghost signals .
-ghost lint .ghost
-ghost verify .ghost --root .
-```
-
-The fingerprint records durable surface-composition guidance:
-
-1. **Intent** - what must remain true: what product this is, who it
-   serves, which situations matter, and which principles or contracts apply.
-2. **Inventory** - the materials it draws from: topology, building blocks,
-   files, routes, assets, libraries, exemplars, and source links agents may
-   inspect or use.
-3. **Composition** - the patterns that make it intentional: rules, layouts,
-   structures, flows, states, content, behavior, and visual arrangements.
-
-Raw repo signals are optional authoring evidence. Curate durable intent,
-inventory, and composition into the facet files, then use normal Git
-review for approval. For a fuller human-agent workflow, read
-[Fingerprint Authoring](/docs/fingerprint-authoring).
-
-</DocSection>
-
-<DocSection title="Relay Context From Ghost">
-
-Before generating or revising UI, gather Relay JSON for the target path:
-
-```bash
-ghost relay gather apps/checkout/review/page.tsx --format json
-```
-
-`ghost.relay.gather/v2` is the agent contract. Agents should read `context`,
-`selected_context`, `targetPaths`, `source`, `stackDirs`, gaps, and trace fields
-from JSON. Plain `ghost relay gather <target>` remains a compact human preview.
-For prompt-shaped work where there is no clear path, host agents can create a
-`ghost.relay-request/v1` and run
-`ghost relay gather --request-stdin --format json`.
-Relay config controls the runtime. Omitted `base` uses the resolved fingerprint
-stack; `base.kind: none` lets frameworks provide declared request context
-without a `.ghost` package:
-
-```bash
-GHOST_RELAY_CONFIG=.agents/ghost/relay.yml ghost relay gather --request-stdin --format json
-ghost relay gather stacks/portal.renewal-reminder.email.yml --config .agents/ghost/relay.yml --format json
-```
-
-The package remains the approved product-surface context; review and check
-commands apply it after implementation.
-
-</DocSection>
-
-<DocSection title="Govern Changes">
-
-After implementation, run Ghost against the same fingerprint:
-
-```bash
-ghost check --base main
-ghost review --base main
-```
-
-`ghost check` applies active deterministic gates from the resolved fingerprint
-stack for each changed file. `ghost review` emits advisory context grounded in
-the same selected context as Relay, selected validation checks, and the diff.
-
-Wrappers should consume `ghost check --format json` and map Ghost severities
-outside Ghost. Ghost severities remain `critical`, `serious`, and `nit`.
-
-</DocSection>
-
-<DocSection title="Compare And Track Intent">
-
-```bash
-ghost compare market/.ghost dashboard/.ghost
-ghost stack apps/checkout/review/page.tsx
-ghost ack --stance aligned --reason "Initial baseline"
-ghost track new-tracked.fingerprint.md
-ghost diverge typography --reason "Editorial product uses a different type scale"
-```
-
-Package comparison uses canonical `.ghost/` packages. `ack`,
-`track`, and `diverge` record stance for compatibility drift workflows that
-track direct fingerprint markdown references.
 
 </DocSection>

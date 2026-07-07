@@ -1,165 +1,147 @@
 ---
 name: authoring-scenarios
-description: Choose the right human-agent workflow for authoring Ghost fingerprints.
+description: Choose the right human-agent workflow for authoring Ghost brand fingerprints.
 handoffs:
-  - label: Inspect fingerprint contribution
-    command: ghost scan --format json
-    prompt: Classify this repo's fingerprint authoring scenario and summarize absent facets.
-  - label: Inspect nested stacks
-    command: ghost stack <path>
-    prompt: Decide whether this path needs local fingerprint guidance or can inherit the root package.
+  - label: Validate the fingerprint
+    command: ghost validate --format json
+    prompt: Classify this fingerprint's authoring scenario and confirm the package validates.
 ---
 
 # Recipe: Collaborative Fingerprint Authoring
 
-**Goal:** help a human and agent co-author durable product-surface composition
-without turning raw repo scans into product truth.
+**Goal:** help a human and agent co-author durable brand truths through
+conversation — without laundering what a codebase happens to do into what the
+brand means.
 
-Human intent anchors surface composition. Code, docs, examples, screenshots,
-stories, and UI libraries provide evidence. Agent synthesis is draft work until
-the human curates it and ordinary Git review accepts it.
+The fingerprint is medium-agnostic and is not derived from a repo. Its raw
+material is **elicitation**: what the human says, shows, and points at — words,
+screenshots, links, exemplar products, marketing copy, a competitor they define
+themselves against. Agent synthesis is draft work until the human curates it
+and ordinary Git review accepts it.
 
-`auto-draft` is an optional skill mode for reducing blank-page cost. It scans
-first and writes starter facet edits, but those edits are still draft work
-until the human curates them and Git review accepts them.
+Repo-bound reality — components, tokens, paths, building blocks — can be
+recorded as `materials` on the node whose prose explains their purpose. When a
+conversation surfaces "we have a component for that," treat it as material to
+locate and interpret, not as brand truth by itself.
 
-## 1. Classify The Scenario
+## 1. Start With One Repeated Decision
 
-Choose the nearest scenario before writing fingerprint facets:
+Do not try to fingerprint the whole brand at once. Ask the human for the one
+decision whose feedback keeps repeating — the checkout always flagged for
+trust, the voice always re-toned, the empty state always rewritten — and
+capture that one truth as a node first. One high-confidence truth beats an
+empty catalog; the fingerprint grows as the next repeated decision shows up.
+
+The scenario below tunes the authoring *posture* for that first node; it is not
+a gate to clear before writing anything.
 
 | Scenario | Default authoring posture |
 | --- | --- |
-| Net new repo | Human-led. Capture intent, audience, product posture, and early anti-goals before adding much inventory. |
-| Net new repo + UI library | Human-led with library evidence. Record how this product uses the library, not just that the library exists. |
-| Existing repo | Human + scan. Use repo scans to find repeated patterns and exemplars; ask which ones are canonical. |
-| Existing repo with mixed quality | Curated scan. Separate canonical examples from drift, legacy debt, and accidental repetition. |
-| Design system or UI library | Grammar-led. Describe primitives, component behavior, token posture, accessibility, and composition constraints. |
-| Rebrand, redesign, or migration | Human-led transition. Capture current, target, and migration cautions; use decisions for rationale. |
-| Prototype becoming product | Ratification-led. Preserve only the emergent patterns a human wants to keep. |
-| Fork, white label, or tenant variant | Shared base + local divergence. Keep common surface composition broad and local differences scoped. |
-| Monorepo or nested surfaces | Stack-aware. Use root guidance for product-family composition and nested packages for surfaces assessed differently. |
+| Net new brand | Stance-first. Elicit feel, audience, and early anti-goals before anything else exists to point at. |
+| Established brand, first fingerprint | Artifact-rich interview. The human can show a lot — shipped surfaces, brand docs, campaigns. Elicit which of it is *intentional*. |
+| Strong opinions, weak articulation | Example-led. The human knows it when they see it: work from exemplars and counter-exemplars ("this feels like us, this never would") toward the stance underneath. |
+| Brand doc or design-language deck exists | Distillation. The document is testimony, not truth: pull the claims that actually steer decisions, drop the aspirational filler, and have the human ratify each survivor. |
+| Rebrand, redesign, migration | Transition-led. Capture current, target, and what must not be lost in between. |
+| Fork, white label, tenant variant | Shared base + local divergence. Keep common truths broad; scope divergence with conditions. |
+| Monorepo or product suite | One contract per package. |
 
-If more than one scenario applies, start with the broad repo scenario, then run
-the nested decision test for individual products, apps, or feature areas.
-
-Use auto-draft when an existing repo has enough product evidence to support a
-starter sketch. Avoid relying on auto-draft for net-new repos, thin prototypes,
-major redesigns, or mixed-quality surfaces where repeated code may mostly be
-legacy or accidental.
+If more than one applies, start with the broad scenario, then narrow.
 
 ## 2. Interview The Human
 
-Ask only high-leverage questions that change the fingerprint:
+The interview is the engine. Ask only high-leverage questions that change the
+fingerprint:
 
-- What should this product feel like, and what should it never become?
+- What should this brand feel like, and what should it never become? (The
+  "never become" answers are anti-goal nodes — capture them with the same care
+  as the affirmative stance.)
 - Who is the audience, and what are they trying to get done?
-- Which screens, flows, stories, or examples show the product at its best?
-- Which current patterns are legacy, accidental, experimental, or low quality?
-- Where do trust, density, pacing, accessibility, recovery, or disclosure matter most?
-- Are there surfaces where the same UI decision should be assessed differently?
+- Which surfaces, campaigns, or moments show the brand at its best? Show me.
+- Which brand or product do you admire — and where do you deliberately differ?
+  (The deliberate differences also route to anti-goal nodes: the rejected
+  neighbor, named.)
+- What keeps getting flagged in review, re-toned, or rewritten?
+- Where do trust, density, pacing, accessibility, recovery, or disclosure
+  matter most?
+- Which truths are universal, and which only hold under a specific situation?
 
-Use human-authored or human-approved answers in `intent.yml`. Do not treat
+Capture human-authored or human-approved answers as nodes. Do not treat
 unapproved notes as canonical.
 
-When auto-draft is requested, move the interview after the starter draft and
-use it to curate claims instead of asking every question up front.
+## 3. Work The Material The Human Brings
 
-## 3. Scan For Evidence
+Ask for artifacts and read them closely: screenshots, links, exemplar products,
+brand docs, marketing copy, past campaigns, a rejected design and why it was
+rejected. Treat every artifact as *testimony* — evidence of a stance the human
+holds — never as truth by itself. A pattern that appears everywhere may be
+legacy; a pattern that appears once may be the brand at its best. The human
+says which.
 
-Read the product, not just the component library. Inspect routes, components,
-stories, tests, docs, screenshots, examples, copy, tokens, assets, and UI
-library references that reveal hierarchy, behavior, accessibility, trust, and
-flow.
+Counter-exemplars are as valuable as exemplars when they name the replacement.
+"We would never ship this; we would ship that instead" with artifacts attached
+usually yields a sharper guard than an hour of affirmative description. Avoid
+blacklist-only anti-goals: the rejected pattern should be purged from exemplars
+and enforced in review, not repeated as the model's main example.
 
-Optional signals:
+## 4. Draft The Nodes
 
-```bash
-ghost signals .
-```
+Write the smallest useful set of nodes, each a purpose-coherent prose truth with
+a one-line `description`, named `<kind>.<slug>.md` (or a bare slug when no kind is present). Ask three questions of each body: why (the stance), with what
+(the materials), and how it is assembled (the patterns). These are drafting
+prompts, not fields.
 
-Treat signals as scratch evidence. They can support curated entries in
-`inventory.yml`, but it does not establish surface-composition guidance by
-itself.
-
-In auto-draft mode, always gather signals before drafting, then inspect the
-high-signal files they point to. Signal facts may seed `inventory.yml`; scan
-frequency and raw signals do not establish surface-composition guidance.
-
-## 4. Draft The Core Facets
-
-Write the smallest useful durable content:
-
-- `intent.yml`: product summary, audience, situations, principles, contracts,
-  anti-goals, and tradeoffs.
-- `inventory.yml`: topology, building blocks, source links, and curated
-  exemplars the agent can inspect or use.
-- `composition.yml`: patterns, layouts, structures, flows, states, content,
-  behavior, and visual arrangements.
-
-Label uncertain reasoning in the working notes as provisional. Prefer a few
-high-confidence claims with evidence over a broad catalog.
-
-In auto-draft mode, write directly to the facet files rather than a
-separate proposal artifact. Keep entries sparse, cite concrete files or
-exemplars where possible, and leave ambiguous product meaning for curation.
+Draft only what the human said or showed. State universal truths plainly; give
+narrower truths a **condition** in the prose — the situation they apply in,
+never a destination. Label uncertain reasoning as provisional. Prefer a few
+high-confidence truths over a broad catalog. Hold draft prose to the node prose
+stances in [capture.md](capture.md) and score each node against its drafting
+gate before presenting drafts for curation.
 
 ## 5. Curate With The Human
 
-Before treating draft content as durable surface context, ask the human to classify
-important claims:
+Before treating draft content as durable, ask the human to classify important
+claims:
 
 - keep as canonical
 - soften into guidance
 - reject as accidental or legacy
 - move to scratch notes
-- scope to a nested package
-- convert into a deterministic check
+- restate at a broader or narrower altitude (add or drop a condition)
 
-Only add checks when the rule can be enforced deterministically. Subjective
-composition critique belongs in `composition.yml` or advisory review, not in a
-blocking gate.
+## 6. Decide Kinds And Altitude
 
-## 6. Decide Nested Packages
+Two authoring decisions replace any notion of hierarchy:
 
-Create or update a local `.ghost/` only when a surface should be assessed
-differently from the root package.
-
-Use a nested package when the local surface has distinct:
-
-- users or jobs-to-be-done
-- density or information architecture
-- trust, safety, privacy, or recovery posture
-- interaction rhythm or workflow length
-- component grammar or UI library usage
-- review criteria for the same UI decision
-
-Keep broad product-family guidance at the root. Put local obligations in the
-nearest package that owns the surface. Validate nested repos with stack-aware
-commands:
-
-```bash
-ghost stack <path>
-ghost lint --all
-ghost verify --all
-```
+- **Kind** — declare the kind vocabulary in `glossary.md` and name each node
+  `<kind>.<slug>.md` so its normative weight is clear. The glossary defines what
+  each kind means and how strongly it binds. Use `posture: guard` for
+  review-critical replacement nodes, `posture: wild` for opt-in provocations,
+  and the default steady posture for ordinary truths. Kinds are your choice;
+  Ghost ships no fixed vocabulary.
+- **Altitude** — state a truth at the level it is actually true. Universal → state
+  it plainly. Narrower → name the situation that activates it, in the prose. Never
+  file a truth by destination (`for-emails.md`); the model reads the condition and
+  decides when it applies.
 
 ## 7. Validate And Ratify
 
-Validate before calling facets useful:
-
 ```bash
-ghost lint .ghost
-ghost verify .ghost --root <target>
-ghost check --base HEAD
+ghost validate .ghost
 ```
 
-Use ordinary Git review as the approval boundary. Uncommitted or unmerged
-fingerprint edits are drafts; checked-in Ghost package facet files are the
-canonical package.
+`validate` checks artifact shape, per-node validity, and that each node's kind
+prefix is a declared glossary kind (undeclared → warning with a "did you
+mean" suggestion). Use ordinary Git review as the approval boundary: uncommitted
+edits are drafts; checked-in nodes are canonical.
 
 ## Never
 
-- Never copy raw inventory into canonical facets without curation.
-- Never claim scan frequency is product authority.
-- Never create nested packages just to mirror directory structure.
-- Never turn advisory composition critique into a deterministic gate.
+- Never derive brand truth from repo code alone; what the codebase repeats may
+  be legacy, not stance. Use repo paths as `materials` only after the prose
+  truth has been curated.
+- Never draft a node the human neither said nor showed; that is invention
+  wearing the brand's clothes.
+- Never treat a brand doc, an artifact, or repetition frequency as brand
+  authority; the human ratifies what is intentional.
+- Never invent a hierarchy, inheritance, or edges — the package is flat.
+- Never file a truth by destination; state its condition in the prose.

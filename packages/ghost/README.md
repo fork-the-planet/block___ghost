@@ -1,109 +1,74 @@
-# @anarchitecture/ghost
+# @design-intelligence/ghost
 
-**A unified Ghost CLI for product-surface composition fingerprints.**
+**Your brand, packed for agents: a portable steering packet of prose truths,
+checked into the repo, read before anything is made and reviewable after.**
 
-Ghost captures the composition of a product surface: the intent behind it, the
-materials it draws from, and the patterns that make it feel intentional. It
-stores that composition in a repo-local `.ghost/` package that host
-agents can read before generation and validate after changes.
+This package ships one CLI: `ghost`. Every command is also available as
+`ghost-fingerprint` for when another tool owns the `ghost` bin.
 
-This package ships one CLI: `ghost`.
-
-## Project Status: Beta
-
-> [!WARNING]
-> Ghost is pre-1.0 and under active development. The CLI, fingerprint schema,
-> on-disk `.ghost/` package shape, and public JavaScript exports may
-> change in breaking ways before a stable 1.0 release.
->
-> Breaking changes may ship in minor versions while Ghost is pre-1.0. Patch
-> versions are reserved for fixes that should not require migration. If you adopt
-> Ghost today, expect some churn, pin the version you depend on, and review
-> release notes before upgrading.
+The scope is the thesis: the few still write the taste; they no longer gate it.
+You hand the brand over as a packet of authority that travels to wherever work
+ships.
 
 ## Install
 
 ```bash
-npm install -D @anarchitecture/ghost
+npm install -D @design-intelligence/ghost
 npx ghost --help
-npx ghost --help --all
 ```
 
-`ghost --help` shows the core workflow. `ghost --help --all` shows the complete
-command index.
+## Shape
+
+```text
+.ghost/
+  manifest.yml          # schema + package id
+  glossary.md           # category vocabulary
+  index.md              # front door node
+  principle.trust.md    # prose truth
+  asset.logo.md         # prose truth, optionally with materials
+  checks/               # optional review assertions; never gathered as nodes
+```
+
+A node is markdown with `description`, optional `materials`, and a prose body.
+`materials` accepts repo-relative paths/globs and HTTPS URLs.
+
+Checks live under `.ghost/checks/` (scaffold with `ghost checks init`) and
+declare `references` to the nodes they review.
+`ghost review` reads a diff, matches touched files to node materials, offers
+relevant checks, and emits an advisory packet for the host agent.
 
 ## Use
 
-Create and validate the fingerprint package:
-
 ```bash
 ghost init
-ghost scan --format json
-ghost lint .ghost
-ghost verify .ghost --root .
+ghost checks init
+ghost validate
+ghost gather "checkout settings"
+ghost pull principle.trust
+ghost review --diff=-
+ghost pulse
 ```
 
-Gather context before generation:
-
-```bash
-ghost relay gather apps/checkout/review/page.tsx
-```
-
-Govern changes afterward:
-
-```bash
-ghost check --base main
-ghost review --base main
-```
-
-Install the BYOA skill bundle so your host agent can author, brief, review,
-verify, remediate, and update fingerprints:
-
-```bash
-ghost skill install
-```
-
-Advanced commands such as `signals`, `stack`, `compare`, `ack`, `track`, and
-`diverge` remain available in the full command index.
-
-Zero config for every verb. No API key is required. `OPENAI_API_KEY` /
-`VOYAGE_API_KEY` are optional and only used by semantic embedding helpers when a
-host opts in.
+`ghost manifest` emits a self-describing JSON index of commands and flags.
+`ghost skill install` installs the host-agent skill bundle.
 
 ## Library
 
 ```ts
-import { compare } from "@anarchitecture/ghost/compare";
-import { runGhostCheck } from "@anarchitecture/ghost/govern";
-import { gatherRelayContext } from "@anarchitecture/ghost/relay";
 import {
   initFingerprintPackage,
   lintFingerprintPackage,
-  verifyFingerprintPackage,
-} from "@anarchitecture/ghost/fingerprint";
+  loadFingerprintPackage,
+} from "@design-intelligence/ghost/fingerprint";
+import { buildCatalogMenu } from "@design-intelligence/ghost/core";
+import { buildCli } from "@design-intelligence/ghost/cli";
 ```
 
-## BYOA
-
-Ghost is bring-your-own-agent. The CLI performs deterministic work: repo
-signals, readiness reporting, linting, verification, comparison, checks, and
-advisory review packet generation. The installed `ghost` skill teaches a host
-agent how to capture canonical `.ghost/` surface-composition
-context, brief and generate work from it, review changes against it, verify
-generated UI, remediate issues, and suggest fingerprint edits when the user
-asks.
-
-```text
-Set up the Ghost fingerprint for this repo.
-Brief this work from the Ghost fingerprint.
-Review this PR against the Ghost fingerprint.
-```
-
-## Maintainers
-
-npm renders this package-local `README.md`, not the monorepo root README. The
-npm package page updates only when a new package version is published, so
-README-only changes still need a patch changeset and release.
+Available subpath exports: `@design-intelligence/ghost`,
+`@design-intelligence/ghost/fingerprint`,
+`@design-intelligence/ghost/core`,
+`@design-intelligence/ghost/cli`, and
+`@design-intelligence/ghost/scan`.
 
 ## License
 

@@ -1,4 +1,4 @@
-import { cn } from "ghost-ui";
+import { cn } from "@design-intelligence/vessel";
 import { ComponentProps } from "react";
 
 function PageHeader({
